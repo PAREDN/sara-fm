@@ -1,0 +1,13 @@
+logs/
+__pycache__/
+sara_pp_settings.json
+sara_pingpong_log.csv
+selftest_result.txt
+sara_pp_crash.log
+sara_pp_speed.json
+sara_chat.json
+sara_chat.json.tmp
+chat_files/
+build/
+dist/
+*.zip
