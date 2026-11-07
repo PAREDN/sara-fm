@@ -1,0 +1,26 @@
+{
+ "generator": "tools/make_test_vectors.py",
+ "reference_version": "sara-fm-0.9.80",
+ "vectors": [
+  "clean-bpsk",
+  "clean-qpsk",
+  "clean-qpsk-wide",
+  "clean-16qam-wide-c",
+  "clean-16qam-wide",
+  "clean-64qam-wide-c",
+  "clean-64qam-wide",
+  "multiblock-qpsk",
+  "multiblock-16qam-wide-c",
+  "ping-bpsk",
+  "pong-bpsk",
+  "chat-qpsk",
+  "batch-report-qpsk-wide",
+  "noisy-bpsk",
+  "noisy-qpsk",
+  "noisy-qpsk-wide",
+  "noisy-16qam-wide-c",
+  "noisy-16qam-wide",
+  "noisy-64qam-wide-c",
+  "noisy-64qam-wide"
+ ]
+}
