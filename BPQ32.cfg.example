@@ -1,0 +1,82 @@
+; ============================================================
+;  BPQ32 Port config for SARA-PP (OFDM modem over TCP/KISS)
+;
+;  Carried forward from the original SARA FM project's config,
+;  confirmed working with BPQ32 v6.0.25.1 -- these are NOT
+;  obvious from BPQ32's own docs, and got this wrong more than
+;  once before landing on this exact shape:
+;
+;  1. TYPE=ASYNC   not TYPE=KISS   (TYPE=KISS is invalid)
+;  2. TCPPORT=     not IPPORT=     (IPPORT is silently ignored)
+;  3. PROTOCOL=KISS on its own line, after TYPE=ASYNC
+;
+;  SARA-PP is the TCP SERVER here -- it listens, BPQ32 connects
+;  to it. Start SARA FM (press Start; the bridge starts with
+;  it) BEFORE starting/restarting BPQ32, or BPQ32 will
+;  fail to connect on its own startup and you'll need to kick
+;  its port to retry.
+; ============================================================
+
+PORT
+  PORTNUM=1
+  ID=SARA-PP OFDM
+
+  ; ASYNC = serial-style port (required for KISS over TCP)
+  TYPE=ASYNC
+
+  ; KISS framing protocol
+  PROTOCOL=KISS
+
+  ; TCP connection to SARA-PP -- must match the "KISS TCP port"
+  ; field in the SARA-PP GUI exactly (default 8105 on both sides)
+  IPADDR=127.0.0.1
+  TCPPORT=8105
+
+  ; Speed for BPQ32's own display only -- it does not change
+  ; anything SARA-PP actually does. Set to whatever modulation
+  ; you expect to be running most of the time (900 for BPSK,
+  ; 1800 for QPSK); BPQ32 can't tell which one a given frame
+  ; used anyway, since that's negotiated per-frame by SARA-PP
+  ; itself, not by BPQ32.
+  SPEED=900        ; with SARA-PP "Auto" the speed changes per station anyway
+
+  ; Packet parameters -- FIELD-PROVEN values (DW1IRF <-> K6IRF,
+  ; SARA-PP v0.6.x, ~771 bps effective). Do not revert to the old
+  ; FRACK=8000 / SLOTTIME=100 / PERSIST=64 starting values.
+  PACLEN=236
+  MAXFRAME=7       ; SARA-PP sends the whole window under one key-up
+  TXDELAY=150      ; ignored -- SARA-PP's own "TX delay" setting keys the radio
+  TXTAIL=50        ; ignored -- likewise
+  FRACK=20000      ; a full 7-frame window takes ~14s (QPSK) to air, and BPQ32
+                   ; starts this timer at hand-off, not when frames go out;
+                   ; 8000 caused wasted mid-burst polls
+  RESPTIME=500     ; v0.9.14: was 2000. BPQ32 waits this long after the last
+                   ; frame of a window before acknowledging it; field logs
+                   ; (16QAM Wide, DW1IRF -> DV1UK-10) showed that wait in every
+                   ; ~8 s cycle. SARA-PP holds an early acknowledgment until the
+                   ; channel is clear, so a short RESPTIME can't collide.
+  RETRIES=5
+  SLOTTIME=10      ; SARA-PP does its own carrier sense + jitter; BPQ32's
+  PERSIST=255      ; old 1.8s slots only added delay before every frame
+
+  ; --- KISS ACKMODE (SARA-PP v0.9.0 and later ONLY) ---------------------
+  ; With ACKMODE, SARA-PP tells BPQ32 the moment each frame actually goes
+  ; on the air, so FRACK counts from then, not from hand-off -- a lost
+  ; frame is noticed sooner, and long BPSK windows (which Auto may choose
+  ; on a weak link) no longer outlast FRACK. To use it:
+  ;   1. Make sure THIS station runs SARA-PP v0.9.0 or later. An older
+  ;      SARA-PP ignores ACKMODE frames: NOTHING would be transmitted.
+  ;   2. Uncomment the line below and lower FRACK, e.g. to 12000 (the other
+  ;      station's acknowledgment normally starts 2-5 s after our window
+  ;      ends). Watch the first sessions; 10000 if no needless polls show.
+  ;   3. Restart BPQ32. SARA-PP logs "KISS ACKMODE in use".
+  ;KISSOPTIONS=ACKMODE
+  ;FRACK=12000
+
+  ; --- Digipeater (SARA FM v0.9.37 and later) ---------------------------
+  ; Uncomment to let BPQ32 repeat frames sent via this node on this port.
+  ; 1 = repeat everything, 255 = UI frames only, 0 = off. Do NOT also tick
+  ; SARA Setup > Digipeater on the same station (frames would go out twice).
+  ;DIGIFLAG=1
+
+ENDPORT

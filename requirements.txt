@@ -1,0 +1,5 @@
+numpy
+scipy
+pyaudio
+hidapi   # only needed if PTT method = CM108
+pyserial # only needed if PTT method = RTS or DTR

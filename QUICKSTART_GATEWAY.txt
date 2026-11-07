@@ -1,0 +1,415 @@
+SARA-PP -- Gateway Quick Start (standalone Windows version, no Python needed)
+============================================================================
+
+1. INSTALL
+   Unzip the whole SARA-FM folder somewhere permanent, e.g. C:\SARA-FM\
+   Keep every file in the folder together (SARA-FM.exe needs _internal\).
+
+2. CHECK THE INSTALL (no radio needed)
+   Plug in the USB audio interface (RA-Board), then double-click
+   "SARA-FM Selftest.bat". All four lines should say PASS.
+   If "sound devices" FAILS, the audio interface isn't detected.
+
+3. FIRST RUN
+   Double-click SARA-FM.exe. A black console window opens behind the
+   program -- leave it open (closing it closes SARA-PP; it also shows
+   errors if anything goes wrong).
+   - Windows SmartScreen may say "Windows protected your PC" because the
+     program isn't code-signed: click "More info" -> "Run anyway".
+   - If Windows Firewall asks about network access, allow it on PRIVATE
+     networks (BPQ32 connects to SARA-PP locally on TCP port 8105).
+
+4. CONFIGURE (per station -- do not copy settings from another gateway)
+   From v0.9.33 setup is in the menu, like VARA FM:
+   Settings > SARA Setup
+   - My callsign, and Gauge title (v0.9.36: a line shown above the gauges
+     in View > Gauges only, e.g. "DX1FLR-10  Winlink Gateway")
+   - KISS TCP port 8105. The BPQ32/KISS bridge starts by itself when you
+     press Start (v0.9.36: there is no separate Start Bridge button)
+   - DCD mode: SARA-PP signals only (the default)
+   Settings > Devices
+   - Input/Output device: the USB audio interface
+   - PTT: CM108, then "Detect" the RA-Board, GPIO pin GPIO3 (0x04)
+   - "Test PTT (2s)" -- confirm the radio keys
+   - TX delay: 600 ms (the default; DX1PRD interface)
+   Main window
+   - Target: pick the station to test with (or type a callsign, add its
+     location, Save). Modulation: Auto (the default).
+   - Start, then Tune. The coloured bar under the buttons says when it is
+     running (yellow) and ends with ONE answer (v0.9.78):
+       APPROVED (green)            -- levels saved for that station; done.
+       an instruction (orange)     -- e.g. TURN UP YOUR TX AUDIO, RAISE YOUR
+                                      TX LEVEL to 40%, YOUR LEVELS ARE FINE --
+                                      the other station should Tune; do that
+                                      one thing and press Tune again.
+       NO REPLY (red)              -- same frequency? other station started?
+     (Tune = the old Auto-Tune + Tune TX in one; "Tune TX level only" is in
+     the Settings menu. The numbers behind the answer are in the log.)
+   - GATEWAYS: Setup > "This station is a gateway: one set of audio levels
+     for every caller". The gateway sysop runs Tune once with a nearby
+     station; after that the gateway keeps those levels for everyone.
+     Callers press Tune with the gateway as Target -- their levels are saved
+     for that gateway and come back each time they connect to it.
+
+5. BPQ32 PORT (see BPQ32.cfg.example)
+   TYPE=ASYNC, PROTOCOL=KISS, IPADDR=127.0.0.1, TCPPORT=8105,
+   SLOTTIME=10, PERSIST=255, FRACK=20000, MAXFRAME=7, PACLEN=236, RESPTIME=500
+   Do NOT use KISSOPTIONS=ACKMODE.
+
+6. VERSIONS MUST MATCH
+   Every station a gateway talks to must run SARA-PP v0.6.x or newer.
+   v0.5.x and v0.6.x cannot decode each other.
+
+7. SETTING LEVELS (and sharing the sound card with VARA FM)
+   Two different numbers -- don't confuse them:
+     S/N (dB)    = how good the RADIO LINK is. On FM the OTHER station's TX
+                   level (deviation) affects it too; your RX gain doesn't.
+                   20+ excellent, 12-20 good, 8-12 marginal, below 8 poor.
+     Level (dBFS)= how loud the sound card delivers it. Just needs to be in
+                   the green zone on the RX meter (around -12 dBFS) and not
+                   showing CLIP.
+   Set the Windows recording/playback levels for VARA FM first (VARA's VU
+   in its green zone). Start SARA FM at RX gain 0 dB and TX level 40% --
+   from v0.9.41 a quiet input is still decoded, so don't chase the meter by
+   hand: just press Tune (Auto-Tune before v0.9.78). It pings in BPSK, raises
+   your TX level by itself if nobody answers, sets RX gain, then tunes the TX
+   level, and ends with one answer. Then, in SARA FM:
+   a) Pick the other station's callsign as Target and
+      press Tune. It pings a few times, sets YOUR RX gain, and prints
+      a report: how you hear them, how THEY hear you, and plain-language
+      advice if something needs changing at the radio or in Windows.
+      (The other station must be started and idle -- not in the middle of
+      a Winlink session.)
+   b) If Auto-Tune gets no reply at all: have the other station press
+      TUNE 10s while you watch your RX meter, and vice versa -- it sends a
+      steady test tone at the same level as real data.
+   c) TX level (%): only change it if Auto-Tune says your signal is near
+      clipping the other station's input, or arrives very quietly.
+   Ignore "quality" from older versions: it was really a volume reading.
+
+8. WINLINK EXPRESS AS THE CLIENT (Packet Winlink session)
+   Each over-the-air round trip on SARA-PP takes a few seconds. If
+   Winlink Express's packet frame-acknowledge timeout / retry timer is
+   short (around 3 s), it re-sends its connect request before the BBS's
+   answer arrives; BPQ32 then resets the link and the session can stall
+   right after "Connected". In the Packet Winlink session settings, set
+   that timeout to about 15-20 seconds if the option is available.
+   Also confirm the TX delay is the same value that tested well for
+   that station (600 ms on the DW1IRF/K6IRF test pair).
+   For faster UPLOADS (messages sent from Winlink Express), raise its
+   packet length (PACLEN) to 236 and max frames (MAXFRAME) to 7, if your
+   version shows those settings. At 128 / 4 it sends ~512 bytes per round
+   trip; at 236 / 7 about 1,650 -- the same as BPQ32 sends for downloads.
+
+   IF THINGS FAIL ONLY AT HIGH POWER (v0.8.7 note)
+   Garbled frames or stalls that go away when TX power is turned down
+   usually mean RF getting into the audio/USB cabling (RF feedback). Fit
+   clip-on ferrite chokes to the USB and audio cables near the RA-Board
+   and the radio, keep the coax away from them, and check the antenna
+   SWR. Then return to normal power.
+
+   IF THE LOG SAYS "PTT release is FAILING" (v0.8.9+)
+   SARA-PP could not tell the RA-Board to unkey -- usually its USB
+   connection dropped for a moment (often RF getting into the cable).
+   SARA-PP retries every second by itself. If it doesn't clear: press Stop,
+   unplug and replug the RA-Board USB, press Start. Then fit ferrite chokes
+   (see above) and press Save Logs so the sysop can see what happened.
+
+   IF A STATION SUDDENLY STOPS HEARING PINGS
+   Look at the radio first: an unchanged SARA-PP that worked minutes ago
+   usually means the radio's receive audio changed. Check the volume
+   knob, the squelch (fully open, or set to just close on noise -- not
+   tighter), any battery-saver / power-save receive mode (turn it off),
+   and the audio cable and connector. Run Auto-Tune again after any change.
+
+   OPEN SQUELCH (squelch at zero, e.g. for VARA FM's input gauge) is
+   supported from v0.7.6: SARA-PP recognises another station keying up by
+   the way its carrier QUIETS the hiss, not by loudness. With squelch
+   open, the RX meter shows loud hiss between transmissions -- that's
+   normal; judge levels by the "Last frame" line and Auto-Tune. Long waits
+   in the log then say "carrier detected by spectrum". One limitation:
+   a transmission that itself fills the audio band above ~2.3 kHz (some
+   wide data modes) may not be recognised as busy on an open-squelch
+   radio; SARA-PP's own transmissions and FM voice are recognised.
+
+9. PING WINDOW AND PINGS WHILE BRIDGED (v0.7.3+)
+   PING or Auto-Tune opens a window like VARA FM's: you on the left, the
+   other station on the right. Left boxes = how you hear them (S/N,
+   level); right boxes = how they hear you (S/N, their input level).
+   Green is good; yellow means adjust or marginal; red means a problem.
+   SARA-PP answers pings while bridged to BPQ32, and PING / Auto-Tune work
+   in bridge mode too -- but only when no Winlink session has moved data
+   for 20 seconds, so a test never cuts into someone's transfer.
+
+10. REMOTE TESTING OVER THE NETWORK (v0.7.5+)
+   Lets a sysop run Winlink Express on their own PC against another
+   station's radio, over Tailscale, the AREDN mesh, or a LAN.
+   On the station being tested:
+   - Tick "Allow network KISS clients". "Allow from" =
+     private (this PC, Tailscale 100.64-127.x, AREDN/LAN 10.x, 172.16-31.x,
+     192.168.x). Add specific IPs or ranges if needed, e.g.
+     "private 44.0.0.0/8". Public internet addresses are refused unless
+     listed.
+   - Press Start (Stop and Start again after changing these). The log shows this PC's IP addresses to connect to.
+   - If Windows Firewall asks, allow it on PRIVATE networks only.
+   On the tester's PC (Winlink Express > Packet Winlink/P2P Setup):
+   - KISS, Serial Port TCP, TCP Host = the station's IP (e.g. its
+     Tailscale address), Port = 8105 (or whatever the station uses).
+   Notes:
+   - ONE KISS client at a time. If that station's own BPQ32 or Winlink
+     Express is connected, a remote connection is refused (logged as
+     "already serving ...") -- close the local client first. This is
+     deliberate: a remote connection can never knock a gateway's BPQ32
+     off the air.
+   - KISS has no password: anyone allowed to connect can transmit on that
+     radio, under any callsign. Keep "Allow from" as narrow as practical
+     and turn the option off when testing is done. The control-operator
+     responsibility for that transmitter doesn't change.
+   - The ping window, meters and Auto-Tune stay on the station's own
+     screen; use remote desktop to see them.
+
+11. DCD -- WHEN SARA-PP WON'T TRANSMIT (v0.7.7+)
+   Like VARA FM, SARA-PP waits while the frequency is busy. The DCD lamp
+   (next to TX and RX, beside the level meter) shows it: GREEN = clear, YELLOW = busy
+   (with the reason: level, spectrum, or SARA-PP signal).
+   - "Transmit anyway" (next to the lamp): take over and send now.
+   - DCD Mode (Settings > SARA Setup):
+       Auto -- default; also holds off for other signals (voice, etc.).
+       SARA-PP signals only -- busy only when another SARA-PP station is
+         heard. Use this if the lamp stays yellow while nobody is
+         transmitting (common with SQUELCH OPEN, where the hiss varies).
+       Off (never wait).
+   - PING, Auto-Tune and TUNE always transmit, whatever the DCD says
+     (same as VARA FM).
+   If the lamp stays yellow for 15 s with no SARA-PP frames heard, the log
+   records what each detector read -- please send that log to the sysop.
+   - v0.9.12: during a session, "busy" with no SARA-PP signal in it
+     (noise, interference, open squelch) holds a transmission at most
+     8 s, not 30. If the log often says "busy but no SARA-PP signal",
+     fix the squelch/noise at that station, or set "SARA-PP signals only".
+
+12. QPSK WIDE -- FASTER TRANSFERS (v0.8.3+, field trial)
+   "QPSK Wide" in the Modulation list uses more of the audio band (656-
+   2625 Hz, 22 carriers instead of 16): about 25% less air time per
+   window than QPSK.
+   - Wide has LESS MARGIN than QPSK (simulated: ~1-3 dB, more on the 9600
+     port). Use it only on strong links: PING S/N +20 dB or better in
+     BOTH boxes. QPSK stays the dependable default.
+   - If Wide frames show many "[FEC repaired N bytes]" (above ~10 per
+     frame), or a transfer stalls, go back to QPSK for that link.
+   - The log's "Carrier check" lines (every 20 frames) show how each part
+     of the band arrives -- please include them when reporting problems.
+   - BOTH stations need v0.8.3+ for Wide. Wide changed in v0.8.3, so
+     v0.8.0-v0.8.2 Wide does NOT work with it (QPSK/BPSK always do).
+   - Each station chooses its own transmit modulation; a station
+     receiving Wide frames decodes them whatever its own setting is.
+   - BPSK is for very weak links only, and NOT with full windows: 7
+     frames of 256 bytes take ~21 s in BPSK, longer than FRACK (BPQ32
+     20 s, Winlink Express 15 s), so every window times out and is
+     resent (a BPSK download once ran 17 minutes). If BPSK is really
+     needed, set MAXFRAME 3. SARA-PP warns when a bridge starts in BPSK.
+   - After a transfer finishes, 4-6 s before the link is free again is
+     normal: the closing exchange (FF, FQ, disconnect, acknowledgment)
+     is several over-the-air turns, each ~1.5-3 s on a half-duplex radio.
+
+13. SENDING LOGS TO THE SYSOP (v0.8.8+)
+   After a test, use Log > Save Logs (Log > Save Report for one small
+   text file of a test run). SARA-PP makes ONE
+   zip file on your Desktop, named with your callsign and the time, e.g.
+       SARA-FM_logs_DU3FS_2026-10-07_1245.zip
+   and opens the folder with it highlighted. Attach that file to your
+   email or message -- no copying, pasting or folder hunting.
+   It contains: a station report (version, settings, levels, time zone),
+   the log for today and the two days before, the ping/pong test log and
+   your settings. Nothing is sent automatically.
+   Tips: tick Log > Verbose RX diagnostics before a test if the sysop asks for
+   detail; note roughly what time any problem happened. The log is also
+   kept automatically in the "logs" folder next to SARA-PP, so it
+   survives closing the program. From v0.9.2 each file is named with
+   the callsign and the time the program started, e.g.
+       sara_pp_K6IRF_2026-10-07_220003.log
+
+14. AUTO SPEED (v0.9.0+)
+   Set Modulation to "Auto". SARA-PP then picks BPSK, QPSK or QPSK Wide
+   by itself, separately for each station it talks to:
+   - It starts in QPSK and steps up to QPSK Wide after two clean reports
+     from the other station (strong signal, little error correction used).
+   - It steps down at once if the other station reports a lost frame,
+     heavy error correction or low signal, or if BPQ32 has to resend.
+   - It steps up again only after things have been clean for a while, so
+     it doesn't flip back and forth.
+   The log shows each change, e.g.
+     Speed to K6IRF-10: QPSK -> QPSK Wide  (they report S/N 28 dB, FEC 3%, 0 lost)
+   and the speed line shows the current choice ("Auto: QPSK Wide to ...").
+   - Best when BOTH stations run v0.9.0+: each tells the other how its
+     frames arrive. With an older station, Auto still steps down when
+     frames have to be resent, but stays at QPSK or below.
+   - Pings, Auto-Tune and TUNE use QPSK when Modulation is Auto.
+   - Gateways: also consider KISS ACKMODE in BPQ32 (see BPQ32.cfg.example)
+     -- needed for long BPSK windows on weak links.
+   - v0.9.4: on a strong link Auto goes one step higher, to 16QAM Wide
+     (about 1.5x faster on big messages). Only between two stations that
+     BOTH run v0.9.4 or newer -- with an older station Auto stops at
+     QPSK Wide, so mixed versions keep working. 16QAM needs a clean,
+     not over-driven signal: if Auto keeps stepping back down from it,
+     check TX level with Auto-Tune (the far end should read in target).
+   - v0.9.1: with a STRONG signal (S/N 24 dB or more) Auto never drops
+     to BPSK -- losses at that signal level are not radio noise, and
+     BPSK would only be slower. If it has stepped down, it tries the
+     faster mode again after about 45 s ("trying faster again").
+   - Each new connection starts fresh at QPSK ("New connection with ...:
+     Auto starts fresh") -- so disconnecting and reconnecting gives a new
+     reading, as in VARA FM.
+   - v0.9.12: a mode that fails right after Auto moves into it (e.g. QPSK
+     from a station whose TX audio is distorted) is put "on hold" for
+     90 s, doubling on each repeat up to 10 min -- Auto stays in the mode
+     that works instead of losing a window every minute. If you see
+     "on hold" often, check that station's TX level (DISTORTED warning).
+   - v0.9.13: if narrow QPSK keeps having trouble with a station while
+     QPSK Wide works (the log's carrier check shows the lowest carriers,
+     562/656 Hz, weak), Auto skips QPSK with that station: BPSK <-> QPSK
+     Wide, and new connections start in QPSK Wide.
+   - v0.9.14 TUNE TX: with the other station's callsign as Target (both on
+     v0.9.14+, idle), press Tune TX. It tries several TX levels and keeps
+     the loudest one the other station receives clean. Run it once per
+     station pair after any radio/interface change.
+   - With VOX (e.g. SignaLink), set TX delay to at least 300 ms, or the
+     start of each frame is cut off while the radio keys up.
+   - If the log says "WARNING: this PC is not keeping up with the audio",
+     frames are being lost on THIS PC, not on the radio path: close other
+     busy programs; on a laptop plug in the charger and choose a High
+     performance power plan.
+
+15. DIGIPEATER (v0.9.37+)
+   A station in the middle can relay for two stations that can't hear
+   each other: DW1IRF connects to "DX1FLR-10 via DX1CW" and DX1CW repeats
+   every frame both ways. Every station on the path must run SARA FM
+   v0.9.37 or newer. There are two ways to run the station in the middle:
+
+   a) SARA FM repeats by itself (the relay needs no BPQ32 at all):
+      Settings > SARA Setup > Digipeater, tick "Repeat frames sent via this
+      station". It answers to My callsign exactly as typed (DX1CW is not
+      DX1CW-1). "Also answer to alias" adds other names, e.g. RELAY; the
+      repeated frame then shows the real callsign. Press Start and leave it
+      running. The log shows "DIGI: repeating ..." for each relay.
+   b) BPQ32 repeats (a gateway that already runs BPQ32): add DIGIFLAG=1 to
+      the SARA FM port in bpq32.cfg (see BPQ32.cfg.example). BPQ32 answers
+      to its node call/alias. Leave the SARA FM Digipeater box OFF -- with
+      both on, every frame goes out twice; SARA FM warns if it sees that.
+
+   On the stations at the ends:
+   - BPQ32: connect with  C 1 DX1FLR-10 VIA DX1CW  (port 1 = SARA FM).
+   - Winlink Express: put the digipeater in the packet session's path
+     (e.g. DX1FLR-10 via DX1CW).
+   - BPQ32 and Winlink Express stretch their retry timer for each
+     digipeater by themselves. Every frame is on the air twice, so expect
+     a bit under half the speed of a direct link.
+
+   Auto speed, link reports and saved levels go by the RADIO hop: DW1IRF
+   sets its speed and levels for DX1CW, and DX1CW sets its own for each
+   end. The log shows the path, e.g. "DW1IRF>DX1FLR-10 via DX1CW*"
+   (* = already repeated). DW1IRF also sees "[our frame, repeated by
+   DX1CW]" -- proof the relay heard it.
+
+   At the gateway (v0.9.71): a caller that comes in through a digipeater
+   is shown to BPQ32 as a direct connection, and SARA FM puts the path back
+   on BPQ32's replies (Setup > Digipeater, "Gateway: show callers ... as
+   direct", on by default). Through the digipeater, Winlink messages
+   otherwise failed the CMS checksum, while the very same frames sent direct
+   went through. Each Winlink message is also checked as it passes: look for
+   "B2 message ... checksum OK -- intact" in both stations' logs.
+
+16. SARA CHAT (v0.9.38+)
+   Press Start, then the Chat button (or Chat > Open SARA Chat).
+   - To chat with a station: double-click it in the Heard list, or type its
+     callsign in "To:" and press Open chat. Type, press Enter.
+   - Each message shows: sending -> sent -> delivered (confirmed by the
+     other station). If it can't be delivered now it is HELD and goes by
+     itself the next time that station is heard (chat, ping or Winlink).
+   - NET (everyone): CQ calls everybody, Check in joins a net; check-ins are
+     marked in the Heard list.
+   - Send file...: pictures or files up to 32 kB (32 kB takes several
+     minutes on the air -- shrink pictures first).
+     Received files: Chat > Open received files folder.
+   - A gateway can chat while BPQ32 is connected: chat never goes to
+     BPQ32, and it waits while a Winlink session is moving data.
+   - Both stations need SARA FM v0.9.38 or newer; with v0.9.39 on both, chat
+     speed climbs with the S/N like a Winlink session (Modulation: Auto),
+     and the speed gauge shows chat and file traffic.
+
+   SARA CHAT FROM ANOTHER COMPUTER (v0.9.75+) -- like VARA Chat with VARA FM
+   An operator with no radio chats under HIS OWN callsign through a station's
+   radio, over Tailscale / AREDN / LAN. BPQ32 keeps the KISS port; remote
+   chat has its own port (8180) and takes several operators at once.
+   - At the station (has the radio): Setup > SARA Chat over the network >
+     tick "Let operators on other computers chat through this station's
+     radio" (port 8180). Uses the KISS "Allow from" list (private =
+     Tailscale, AREDN, LAN). Press Stop, then Start. The log says "Remote
+     chat ON (port 8180)"; Windows Firewall: allow Private networks.
+   - At the operator's PC: install SARA FM, set YOUR callsign, then Setup >
+     SARA Chat over the network > tick "Chat through a remote SARA FM
+     station", enter the station's Tailscale IP and port 8180. No radio,
+     sound card or Start needed -- just open Chat. The log says "Remote
+     chat: connected to <station>".
+   - Everything works as on the station: receipts, held messages, NET, CQ,
+     check-ins, files. A message between the station's own operator and a
+     remote operator is passed locally, without going on the air.
+   - The station shows remote operators in its log ("Remote chat: DU1ABC
+     connected from 100.x.x.x"). No password, as with KISS: anyone allowed
+     in can transmit through that radio.
+
+17. FOR TEST VOLUNTEERS -- WHAT TO SEND BACK (v0.9.49+)
+   After a test (or when something doesn't work), send the sysop:
+   - Log > Save Report. One small text file: version, levels, CPU, what the
+     receiver decoded or turned away and why, and the session summaries.
+     Save it at BOTH ends if two stations were testing together.
+   - If two stations can't decode each other but VARA FM works between them:
+     Log > Record received audio (60 s) at the receiving end, then have the
+     other station press TUNE 10s and PING. Send the WAV from the log folder.
+   - A line or two: which stations, which radios/interfaces, what you did,
+     what you expected. A screenshot of VARA FM's ping between the same two
+     stations is a useful comparison.
+   Tips:
+   - Start at RX gain 0 dB and TX level 40%, press Auto-Tune, and let Tune TX
+     finish. It often LOWERS the TX level -- overdriving is common and
+     costs more than it gains.
+   - If Auto-Tune gets no reply but the OTHER station's log shows
+     "NOTE: SARA FM signals arrive here strong ... but won't decode", your
+     radio is overdriven: lower your TX level to 20% (or less) and try again.
+     From v0.9.50 Auto-Tune tries a lower level by itself first.
+     From v0.9.51 the pinging station notices a clipped reply and asks the
+     other station to answer quieter -- but the cure is still to tune the
+     overdriven station (Auto-Tune from it).
+   - Radio settings at a SARA FM station: dual watch / scan / priority watch
+     OFF, battery save OFF, squelch set firmly (not flickering at threshold).
+     Each of these mutes the audio for a moment and a frame is lost.
+   - BPSK is slow: a 7-frame window is ~22 s on the air, longer than Winlink
+     Express's retry timer. From v0.9.61 SARA FM skips the resends that
+     timer causes ("[skipped N resent frames ...]" in the log), but a
+     session that sits in BPSK is still slow -- if the other station's log
+     says your frames are DISTORTED (preamble S/N much higher than the data
+     carriers), lower your TX level (20% or less) and run Tune TX again.
+   - If one of the two stations is already well tuned, let IT run Auto-Tune
+     to the new station first -- then the new station runs its own.
+   - Watch the CPU meter (status bar): "decoder" near 100% means the PC is
+     too slow for the fast modes -- untick "Auto may use 64QAM".
+   - Keep the frequency clear during a test; two tests at once look like
+     interference in the logs.
+
+SETTINGS ARE SAVED AUTOMATICALLY
+   (They include "My callsign". Never copy a SARA-FM folder from another
+   station's PC -- unzip a fresh copy and enter this station's own
+   callsign. If two stations share a callsign, pings are never answered;
+   from v0.8.2 SARA-PP warns "ANOTHER station is using YOUR callsign".)
+   In sara_pp_settings.json next to SARA-FM.exe, when you press Start and
+   when you close the program. Audio devices are remembered by name, so a
+   Windows renumbering after a reboot doesn't lose them. If the USB audio
+   interface is missing at startup, the log says so.
+
+IF SOMETHING GOES WRONG
+   Send the sysop these files from the SARA-FM folder:
+     sara_pp_crash.log      (only exists if the program failed to start)
+     selftest_result.txt
+     sara_pingpong_log.csv
+     sara_pp_settings.json
+   plus a screenshot or copy of the program's log window.
