@@ -7461,8 +7461,18 @@ def test_slow_pc_buffer_and_kiss_takeover():
     import audio_io, bpq_bridge
     import sara_pingpong as sp
     # 1. larger audio buffer
-    eng = audio_io.AudioEngine(0, 0, rx_buffer_frames=audio_io.RX_BUFFER_FRAMES_LARGE)
-    eng_n = audio_io.AudioEngine(0, 0)
+    # v0.9.88: no sound system at all on GitHub's Linux test machine --
+    # PyAudio() itself fails there; this check is about the buffer setting
+    class _NoSound:
+        def terminate(self):
+            pass
+    _real_pa = audio_io.pyaudio.PyAudio
+    audio_io.pyaudio.PyAudio = _NoSound
+    try:
+        eng = audio_io.AudioEngine(0, 0, rx_buffer_frames=audio_io.RX_BUFFER_FRAMES_LARGE)
+        eng_n = audio_io.AudioEngine(0, 0)
+    finally:
+        audio_io.pyaudio.PyAudio = _real_pa
     check("slow PC: engine takes a 4x larger input buffer when asked (default unchanged)",
           eng.rx_buffer_frames == 4 * audio_io.RX_BUFFER_FRAMES == audio_io.RX_BUFFER_FRAMES_LARGE
           and eng_n.rx_buffer_frames == audio_io.RX_BUFFER_FRAMES)
