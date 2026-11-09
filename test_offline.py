@@ -7182,6 +7182,353 @@ def test_simple_tune_and_gateway_levels():
         app.destroy()
 
 
+def test_raspberry_pi_web_and_ptt():
+    """v0.9.81: Raspberry Pi go-kits. The phone web page reads the window's
+    state and runs its actions on the Tk thread; RTS / DTR finally get their
+    serial port; a Pi GPIO pin can key the radio."""
+    import json, sys as _sys, types, urllib.request
+    import sara_pingpong as sp
+    import ptt as _ptt
+    import web_ui
+    # Pi GPIO PTT through a stand-in gpiozero
+    events = []
+
+    class FakeOut:
+        def __init__(self, pin, active_high=True, initial_value=False):
+            events.append(("open", pin, initial_value))
+        def on(self): events.append("on")
+        def off(self): events.append("off")
+        def close(self): events.append("close")
+
+    saved = _sys.modules.get("gpiozero")
+    _sys.modules["gpiozero"] = types.SimpleNamespace(OutputDevice=FakeOut)
+    try:
+        ctl = _ptt.PTTController(method=_ptt.PTT_PIGPIO, pi_gpio_pin=22)
+        ctl.open(); ctl.ptt_on(); ctl.ptt_off(); ctl.close()
+    finally:
+        if saved is None:
+            _sys.modules.pop("gpiozero", None)
+        else:
+            _sys.modules["gpiozero"] = saved
+    check("Pi GPIO PTT: pin opened unkeyed, keyed, released, closed",
+          events == [("open", 22, False), "on", "off", "close"], str(events))
+
+    app = sp.App()
+    ui = None
+    try:
+        app._save_settings = lambda: None
+        app.ptt_var.set(sp.PTT_RTS)
+        app.serial_port_var.set("")
+        warned = []
+        real_warn = sp.messagebox.showwarning
+        sp.messagebox.showwarning = lambda *a, **k: warned.append(a)
+        try:
+            no_port = app._serial_ptt_kwargs(sp.PTT_RTS)
+        finally:
+            sp.messagebox.showwarning = real_warn
+        app.serial_port_var.set("/dev/ttyUSB0")
+        check("RTS / DTR PTT now gets its serial port (none chosen -> asked for it)",
+              no_port is None and warned and app._serial_ptt_kwargs(sp.PTT_DTR) == {"port": "/dev/ttyUSB0"})
+        app.pi_gpio_var.set("27")
+        check("Pi GPIO PTT takes its pin from Settings", app._serial_ptt_kwargs(sp.PTT_PIGPIO) == {"pi_gpio_pin": 27})
+        st = app._settings_dict()
+        check("serial port and Pi GPIO pin are saved with the settings",
+              st.get("serial_port") == "/dev/ttyUSB0" and st.get("pi_gpio_pin") == "27")
+
+        ui = web_ui.WebUI(app, port=0, allow="private", headless=True, mail_port=3000)
+        ui.start()
+        app.update()
+        base = f"http://127.0.0.1:{ui.port}"
+
+        def get(path):
+            with urllib.request.urlopen(base + path, timeout=5) as r:
+                return r.status, r.read()
+
+        def post(obj):
+            req = urllib.request.Request(base + "/api/action", data=json.dumps(obj).encode(),
+                                         headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return json.loads(r.read())
+
+        def pump():
+            for _ in range(3):
+                ui._tick()
+                app.update()
+
+        code, page = get("/")
+        check("web page: served to a phone on this computer", code == 200 and b"SARA FM" in page)
+        pump()
+        st = json.loads(get("/api/state")[1])
+        check("web page: state has meters, lamps, Tune answer and settings",
+              {"meters", "lamps", "tune", "settings", "options", "chat"} <= set(st)
+              and st["running"] is False and "Pi GPIO" in st["options"]["ptt"])
+        check("v0.9.82: phone page defaults to port 8090 (BPQ32 / LinBPQ use 8080) and offers a Mail button",
+              web_ui.DEFAULT_PORT == 8090 and st.get("mail_port") == 3000 and b'id="mail"' in page)
+        r1 = post({"action": "set", "args": {"settings": {"callsign": "dw1irf", "tx_level_pct": "33",
+                                                           "modulation": "Not a mode", "bogus": 1}}})
+        r2 = post({"action": "target", "args": {"call": "dv1uk"}})
+        pump()
+        check("web page: settings change on the Tk thread (bad choices and unknown keys ignored)",
+              r1["ok"] and app.call_var.get() == "DW1IRF" and app.tx_level_var.get() == "33"
+              and app.modulation_var.get() != "Not a mode")
+        check("web page: picking the target station", r2["ok"] and app.target_var.get() == "DV1UK")
+        try:
+            post({"action": "rm -rf"})
+            bad = False
+        except Exception:
+            bad = True
+        check("web page: unknown actions refused", bad)
+        post({"action": "chat_send", "args": {"to": "DV1UK", "text": "hello from the phone"}})
+        pump()
+        conv = app.chat.convs.get("DV1UK") or []
+        check("web page: SARA Chat message queued from the phone",
+              any(e.get("text") == "hello from the phone" for e in conv))
+        # no devices chosen -> a dialog, shown on the page. (Cleared on purpose:
+        # on a PC with sound cards the first one is picked at startup, and Start
+        # would really open it -- Windows build PC, 0.9.81.)
+        app.in_dev_var.set(""); app.out_dev_var.set("")
+        post({"action": "start"})
+        pump()
+        st = json.loads(get("/api/state")[1])
+        check("headless: a dialog box becomes a notice on the page instead of stopping the program",
+              any("device" in n["text"].lower() for n in st["notices"]) and app.engine is None)
+        log = json.loads(get("/api/log?since=0")[1])["lines"]
+        check("web page: the log follows live", any("web page" in l[2].lower() for l in log))
+        check("web page: refuses addresses outside the allow list",
+              not ui._ip_allowed("8.8.8.8", ui._nets) and ui._ip_allowed("192.168.4.20", ui._nets))
+    finally:
+        if ui is not None:
+            ui.stop()
+        if getattr(app, "engine", None) is not None:
+            try:
+                app._disconnect()
+            except Exception:
+                pass
+        app.destroy()
+
+
+def test_fast_viterbi_same_answers():
+    """v0.9.85: the faster Viterbi decodes exactly what the old one did."""
+    import fec_cc as f
+    rng = np.random.RandomState(5)
+
+    def old_decode(llr, n_bits, rate):
+        pat = f.PUNCTURE[rate]; steps = n_bits + f.TAIL
+        mask = np.tile(pat.T, (-(-steps // pat.shape[1]), 1))[:steps]
+        full = np.zeros((steps, 2)); llr = np.asarray(llr, float); need = int(mask.sum())
+        if len(llr) < need:
+            llr = np.concatenate([llr, np.zeros(need - len(llr))])
+        full[mask] = llr[:need]
+        pm = np.full(f.N_STATES, -1e18); pm[0] = 0.0
+        dec = np.empty((steps, f.N_STATES), dtype=np.uint8)
+        for t in range(steps):
+            l = full[t]
+            m0 = pm[f._PRED[:, 0]] + f._SGN[:, 0, :] @ l
+            m1 = pm[f._PRED[:, 1]] + f._SGN[:, 1, :] @ l
+            c = m1 > m0; dec[t] = c; pm = np.where(c, m1, m0); pm -= pm.max()
+        s_ = 0; out = np.empty(steps, dtype=np.uint8)
+        for t in range(steps - 1, -1, -1):
+            out[t] = f._INPUT_OF[s_]; s_ = int(f._PRED[s_, dec[t, s_]])
+        return out[:n_bits]
+
+    same = True
+    for rate in ("2/3", "3/4"):
+        for noise in (0.8, 1.6, 2.4):
+            info = rng.randint(0, 2, 1500).astype(np.uint8)
+            c = f.encode(info, rate).astype(float)
+            llr = (1 - 2 * c) * 2.0 + rng.normal(0, noise, len(c))
+            same &= np.array_equal(old_decode(llr, len(info), rate), f.decode(llr, len(info), rate))
+    check("v0.9.85 faster Viterbi: identical output to the old decoder (both rates, clean to very noisy)", same)
+    import os as _os, sara_pingpong as _sp  # noqa: F401
+    check("v0.9.86: numpy's maths library limited to one thread (no spinning workers on slow PCs)",
+          all(_os.environ.get(v) for v in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS")))
+
+
+def test_levels_when_calling_out():
+    """v0.9.87 (DW1IRF -> DX1FLR-10, 0.9.86): the session ran at DV1UK's levels
+    (TX 14%, RX 26) because the new folder had no levels saved for DX1FLR, and
+    a gateway never switched levels even for calls it made itself."""
+    import json as _j, os as _o, tempfile, sara_pingpong as sp
+    app = sp.App()
+    logs = []
+    try:
+        app._save_settings = lambda: None
+        app._log = lambda m: logs.append(m)
+        app.targets = [["DX1FLR", "", {"rx_gain_db": 14, "tx_level_pct": 34, "saved": "x"}]]
+        app.rx_gain_db_var.set("26"); app.tx_level_var.set("14")
+        app.gateway_var.set(True)
+        app._apply_profile_for_peer("DX1FLR-10", incoming=False)
+        check("gateway calling out: uses the levels saved for the station it calls",
+              app._current_profile()["tx_level_pct"] == 34 and app._current_profile()["rx_gain_db"] == 14)
+        app._apply_profile_for_peer("DV1UK", incoming=True)
+        check("gateway: the next caller gets the gateway's own levels back",
+              app._current_profile()["tx_level_pct"] == 14 and app._current_profile()["rx_gain_db"] == 26)
+        app._apply_profile_for_peer("DX1FLR-10", incoming=True)
+        check("gateway: a caller with saved levels still gets the gateway levels",
+              app._current_profile()["tx_level_pct"] == 14)
+        app.gateway_var.set(False)
+        logs.clear()
+        app._levels_from_other_installs = lambda peer: (None, "")
+        app._apply_profile_for_peer("DU3FS", incoming=False)
+        check("no saved levels: says so and suggests Auto-Tune (levels unchanged)",
+              any("No saved levels for DU3FS" in m and "Auto-Tune" in m for m in logs)
+              and app._current_profile()["tx_level_pct"] == 14)
+        # sibling folder with the same sound card has them
+        del app._levels_from_other_installs
+        d = tempfile.mkdtemp()
+        mine, other = _o.path.join(d, "sara-fm-0.9.86", "sara-fm"), _o.path.join(d, "sara-fm-0.9.79", "SARA-FM")
+        for x in (mine, other):
+            _o.makedirs(x)
+        dev_in, dev_out = app._dev_name(app.in_dev_var.get()), app._dev_name(app.out_dev_var.get())
+        with open(_o.path.join(other, "sara_pp_settings.json"), "w") as fh:
+            _j.dump({"input_device": dev_in, "output_device": dev_out,
+                     "targets": [["DV1OTT", "", {"rx_gain_db": 12, "tx_level_pct": 30, "saved": "y"}]]}, fh)
+        old = sp.app_dir
+        sp.app_dir = lambda: mine
+        try:
+            prof, src = app._levels_from_other_installs("DV1OTT-10")
+            check("other SARA FM folder next to this one: its saved levels are found",
+                  prof is not None and prof["tx_level_pct"] == 30 and src == "sara-fm-0.9.79")
+            app._apply_profile_for_peer("DV1OTT-10", incoming=False)
+            check("...copied here and used for the call",
+                  app._current_profile()["tx_level_pct"] == 30
+                  and app._find_target("DV1OTT", base_ok=True)[2]["rx_gain_db"] == 12)
+            with open(_o.path.join(other, "sara_pp_settings.json"), "w") as fh:
+                _j.dump({"input_device": "another card", "output_device": dev_out,
+                         "targets": [["DX1PAR", "", {"rx_gain_db": 1, "tx_level_pct": 5}]]}, fh)
+            check("...but not from a folder set up for a different sound card",
+                  app._levels_from_other_installs("DX1PAR")[0] is None)
+        finally:
+            sp.app_dir = old
+        check("report shows gateway mode and which stations have saved levels",
+              "Gateway:      off" in app._station_info() and "DX1FLR" in app._station_info())
+    finally:
+        try:
+            app.destroy()
+        except Exception:
+            pass
+
+
+def test_hold_ack_while_peer_mid_window():
+    """v0.9.88 (Winlink Express via DX1FLR -> DW1IRF-10, BPSK, 0.9.87): the
+    gateway's acknowledgments went out in the 0.2 s gaps of DX1FLR's window
+    and wiped out its next frame every time."""
+    import time as _t, audio_io, bpq_bridge, sara_pingpong as sp
+    app = sp.App()
+    try:
+        G, C = "DW1IRF-10", "DX1FLR"
+        i_frame = _ax25_frame(G, C, [], control=0x02 | (3 << 5), info=b"x" * 40)   # I, P=0
+        i_poll = _ax25_frame(G, C, [], control=0x02 | 0x10, info=b"x")              # I, P=1
+        rr_poll = _ax25_frame(G, C, [], control=0x01 | 0x10, pid=False)             # RR p
+        ack = bpq_bridge.pack_batch([_ax25_frame(C, G, [], control=0x01 | (5 << 5), pid=False)])
+        app._note_peer_burst([i_frame])
+        check("peer sent an I frame with no poll: its window is still going -> our ack waits for a real end",
+              app._peer_mid_window() and app._min_clear_s(ack) == audio_io.DIGI_MIN_CLEAR_S)
+        app._note_peer_burst([i_frame, rr_poll])
+        check("window ended with a poll: answer at once", not app._peer_mid_window() and app._min_clear_s(ack) == 0.0)
+        app._note_peer_burst([i_poll])
+        check("I frame carrying the poll: answer at once", not app._peer_mid_window())
+        app._peer_burst = (_t.time() - 10, True)
+        check("nothing heard for a while: no hold", not app._peer_mid_window())
+        app._note_peer_burst([i_frame])
+        check("ping/chat payloads are never held", app._min_clear_s(b"PING-not-a-batch") == 0.0)
+        # overdrive hint vs. collision with our own transmission
+        class E:
+            _last_tx_end = _t.time() - 1.0
+        app.engine, logs = E(), []
+        app._garbled_total = 0
+        info = {"pre_snr_db": 20.0}
+        app._note_garbled("fec_uncorrectable", info)
+        app._note_garbled("fec_uncorrectable", info)
+        check("strong frame lost right after our own TX: a collision, not counted as an overdriven sender",
+              getattr(app, "_garbled_total", 0) == 0)
+        E._last_tx_end = _t.time() - 30
+        app._note_garbled("fec_uncorrectable", info)
+        check("...but away from our own TX it still counts", app._garbled_total == 1)
+        app.engine = None
+    finally:
+        try:
+            app.destroy()
+        except Exception:
+            pass
+
+
+def test_slow_pc_buffer_and_kiss_takeover():
+    """v0.9.83 (DV1OTT / DU3FS field test, 0.9.79): a slow PC can ask for a
+    larger sound-card buffer; a second program taking over the KISS port is
+    reported instead of silently cutting off the first."""
+    import socket, time as _t
+    import audio_io, bpq_bridge
+    import sara_pingpong as sp
+    # 1. larger audio buffer
+    eng = audio_io.AudioEngine(0, 0, rx_buffer_frames=audio_io.RX_BUFFER_FRAMES_LARGE)
+    eng_n = audio_io.AudioEngine(0, 0)
+    check("slow PC: engine takes a 4x larger input buffer when asked (default unchanged)",
+          eng.rx_buffer_frames == 4 * audio_io.RX_BUFFER_FRAMES == audio_io.RX_BUFFER_FRAMES_LARGE
+          and eng_n.rx_buffer_frames == audio_io.RX_BUFFER_FRAMES)
+    for e in (eng, eng_n):
+        try:
+            e.pa.terminate()
+        except Exception:
+            pass
+    app = sp.App()
+    try:
+        app._save_settings = lambda: None
+        normal = app._rx_buffer_frames()
+        app.slow_pc_var.set(True)
+        st = app._settings_dict()
+        check("slow PC: setting saved and chosen at Start",
+              normal == audio_io.RX_BUFFER_FRAMES and app._rx_buffer_frames() == audio_io.RX_BUFFER_FRAMES_LARGE
+              and st.get("slow_pc_buffer") is True)
+        import gauges as _g
+        app._apply_lite(True)
+        for i in range(app.LITE_LOG_MAX + 50):
+            app._log(f"line {i}")
+        n_lines = int(app.log_box.index("end-1c").split(".")[0])
+        lite_ok = _g.AnalogMeter.LITE and app._lite and n_lines <= app.LITE_LOG_MAX + 1 \
+            and abs(sys.getswitchinterval() - 0.001) < 1e-6
+        import link_adapt as _la
+        caps_lite = app.link_stats.my_caps
+        app.no_coded_var.set(True); app._apply_caps()
+        caps_nc = app.link_stats.my_caps
+        app.link_stats.on_frame("DW1IRF", ofdm.MOD_QPSK_WIDE, 25, 0, 100)
+        rep_nc = app.link_stats.take_report("DW1IRF")
+        st_nc = app._settings_dict()
+        app.no_coded_var.set(False); app._apply_caps()
+        app._apply_lite(False)
+        check("v0.9.85 'No C modes' asks others not to send the coded modes (saved; Slow PC mode alone doesn't)",
+              caps_lite == _la.MY_CAPS and not (caps_nc & _la.CAP_CODED) and (caps_nc & _la.CAP_QAM16)
+              and rep_nc is not None and not (rep_nc.caps & _la.CAP_CODED)
+              and st_nc.get("no_coded_modes") is True and app.link_stats.my_caps == _la.MY_CAPS)
+        check("v0.9.84 Slow PC mode: meters without needle swing, short on-screen log, quicker thread hand-over",
+              lite_ok and not _g.AnalogMeter.LITE and abs(sys.getswitchinterval() - 0.005) < 1e-6)
+    finally:
+        app.destroy()
+    # 2. KISS port takeover
+    msgs = []
+    br = bpq_bridge.BpqBridge(lambda f: None, on_status=msgs.append)
+    br.start(port=0)
+    port = br._server_sock.getsockname()[1]
+    try:
+        a = socket.create_connection(("127.0.0.1", port)); _t.sleep(0.3)
+        b = socket.create_connection(("127.0.0.1", port)); _t.sleep(0.4)
+        took = [m for m in msgs if "took over" in m]
+        cut = [m for m in msgs if "cut off (replaced" in m]
+        check("KISS: a second program taking over the port is reported, and the first is 'cut off'",
+              len(took) == 1 and "Only ONE program" in took[0] and len(cut) == 1, str(msgs[-4:]))
+        c = socket.create_connection(("127.0.0.1", port)); _t.sleep(0.4)
+        took = [m for m in msgs if "took over" in m]
+        check("KISS: repeated takeovers say two programs are taking turns",
+              len(took) == 2 and "taking turns" in took[1] and "Winlink Express" in took[1])
+        c.close(); _t.sleep(0.3)
+        check("KISS: an ordinary disconnect still reads 'disconnected'",
+              msgs[-1] == "KISS client disconnected.", msgs[-1])
+        for s_ in (a, b):
+            s_.close()
+    finally:
+        br.stop()
+
+
 if __name__ == "__main__":
     print(f"SARA-PP offline test suite — ofdm_core {ofdm.VERSION}")
     print("=" * 60)
@@ -7326,6 +7673,11 @@ if __name__ == "__main__":
     test_direct_fallback_and_hop_reports()
     test_remote_chat()
     test_simple_tune_and_gateway_levels()
+    test_raspberry_pi_web_and_ptt()
+    test_slow_pc_buffer_and_kiss_takeover()
+    test_fast_viterbi_same_answers()
+    test_levels_when_calling_out()
+    test_hold_ack_while_peer_mid_window()
     print("=" * 60)
     n_fail = sum(1 for _, s, _ in results if s == FAIL)
     n_pass = sum(1 for _, s, _ in results if s == PASS)

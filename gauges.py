@@ -196,14 +196,21 @@ class AnalogMeter(tk.Canvas):
     # used to repaint all three meters 25 times a second -- noticeable on a
     # slow gateway PC), and at 15 frames a second
     TICK_MS = 66
+    # v0.9.83: Slow PC mode -- 4 redraws a second, the needle jumps straight
+    # to its value (no ballistics), so the window costs far less on old PCs.
+    LITE = False
+    LITE_TICK_MS = 250
 
     def _tick(self):
         d = self._target_db - self._db
         if abs(d) > (self.hi - self.lo) * 0.002:
-            self._db += d * (0.65 if d > 0 else 0.22)  # meter ballistics: up fast, down slow
+            if AnalogMeter.LITE:
+                self._db = self._target_db
+            else:
+                self._db += d * (0.65 if d > 0 else 0.22)  # meter ballistics: up fast, down slow
             self._place_needle(self._db)
         try:
-            self._job = self.after(self.TICK_MS, self._tick)
+            self._job = self.after(self.LITE_TICK_MS if AnalogMeter.LITE else self.TICK_MS, self._tick)
         except tk.TclError:
             pass
 

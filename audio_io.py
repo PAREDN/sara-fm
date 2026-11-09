@@ -235,6 +235,14 @@ DIGI_MIN_CLEAR_S = 1.2
 # - The process asks Windows for "above normal" priority.
 RX_BLOCK = 1024
 RX_BUFFER_FRAMES = 4096
+# v0.9.83: "Slow PC: larger audio buffer". Field (DV1OTT, 0.9.79): an old PC
+# lost sound-card input 1-6 times every 10 s while 16QAM / QPSK Wide frames
+# were arriving (decoder 30-48% busy, window freezes up to 0.6 s), so frames
+# arrived with S/N 25-30 dB and still failed -- phase jumps of 50-175 degrees
+# where audio was missing. Four times the buffer (341 ms of slack) rides out
+# stalls like that. Cost: level meter and carrier sense see audio up to a
+# third of a second later; nothing on the air changes.
+RX_BUFFER_FRAMES_LARGE = 16384
 RX_BACKLOG_DROP_S = 3.0
 
 
@@ -453,8 +461,10 @@ class AudioEngine:
 
     def __init__(self, input_device: int, output_device: int,
                  ptt_method: str = PTT_VOX, ptt_kwargs: dict | None = None,
-                 tx_lead_ms: int = DEFAULT_TX_LEAD_MS, tx_tail_ms: int = DEFAULT_TX_TAIL_MS):
+                 tx_lead_ms: int = DEFAULT_TX_LEAD_MS, tx_tail_ms: int = DEFAULT_TX_TAIL_MS,
+                 rx_buffer_frames: int = RX_BUFFER_FRAMES):
         self.input_device = input_device
+        self.rx_buffer_frames = int(rx_buffer_frames)
         self.output_device = output_device
         self.pa = pyaudio.PyAudio()
         self.rx_stream = None
@@ -538,7 +548,7 @@ class AudioEngine:
         self.rx_stream = self.pa.open(
             format=pyaudio.paInt16, channels=1, rate=ofdm.SAMPLE_RATE,
             input=True, input_device_index=self.input_device,
-            frames_per_buffer=RX_BUFFER_FRAMES, stream_callback=self._rx_callback)
+            frames_per_buffer=self.rx_buffer_frames, stream_callback=self._rx_callback)
         self.tx_stream = self.pa.open(
             format=pyaudio.paFloat32, channels=1, rate=ofdm.SAMPLE_RATE,
             output=True, output_device_index=self.output_device,

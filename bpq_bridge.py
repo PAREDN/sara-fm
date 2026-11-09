@@ -231,6 +231,10 @@ class BpqBridge:
         self.ackmode_seen = False
         # optional hook: called with each AX.25 frame the client asks us to send
         self.on_client_frame: Optional[Callable[[bytes], None]] = None
+        # v0.9.83: a second program on this PC taking over the KISS port
+        self._client_port = None
+        self._replaced_socks: set = set()
+        self._takeovers: list = []          # times of recent takeovers
 
     def _safe_status(self, msg: str):
         # A GUI callback raising here (e.g. a widget torn down mid-call)
@@ -346,6 +350,7 @@ class BpqBridge:
             if allow is not None and not ip_allowed(ip, allow):
                 self._refuse(client, f"Refused KISS client from {ip}: not in the allowed list.")
                 continue
+            took_over_from = None
             with self._client_lock:
                 current_ip = getattr(self, "_client_ip", None)
                 if self._client_sock is not None and current_ip is not None and ip != current_ip:
@@ -358,17 +363,49 @@ class BpqBridge:
                 else:
                     busy = False
                     if self._client_sock is not None:
+                        took_over_from = getattr(self, "_client_port", None)
+                        self._replaced_socks.add(self._client_sock)
                         try:
                             self._client_sock.close()
                         except OSError:
                             pass
                     self._client_sock = client
                     self._client_ip = ip
+                    self._client_port = addr[1]
             if busy:
                 self._refuse(client, f"Refused KISS client from {ip}: already serving {current_ip}.")
                 continue
             self._safe_status(f"KISS client connected from {addr[0]}:{addr[1]}")
+            if took_over_from is not None:
+                self._note_takeover(addr, took_over_from)
             threading.Thread(target=self._client_loop, args=(client,), daemon=True).start()
+
+    TAKEOVER_WINDOW_S = 120.0
+
+    def _note_takeover(self, addr, old_port):
+        """v0.9.83: field (DU3FS, 0.9.79): two programs on one PC -- BPQ32 and
+        Winlink Express, or two copies of SARA FM / BPQ32 -- kept connecting
+        to the same KISS port. Each new connection silently replaced the
+        last, so the program running a Winlink session lost its link mid-
+        session and the far end's polls went unanswered. Say so plainly."""
+        now = time.time()
+        self._takeovers = [t for t in self._takeovers if now - t < self.TAKEOVER_WINDOW_S] + [now]
+        n = len(self._takeovers)
+        port = None
+        try:
+            port = self._server_sock.getsockname()[1]
+        except Exception:
+            pass
+        msg = (f"NOTE: a new connection ({addr[0]}:{addr[1]}) took over SARA FM's KISS "
+               f"port{f' {port}' if port else ''} from the one connected before (:{old_port}) -- that "
+               f"one is now cut off. Normal if BPQ32 just restarted; otherwise another program on this "
+               f"computer uses the same port. Only ONE program may use a KISS port.")
+        if n >= 2:
+            msg += (f" This happened {n} times in the last {self.TAKEOVER_WINDOW_S / 60:.0f} minutes: two "
+                    f"programs are taking turns (e.g. BPQ32 and Winlink Express both set to this port, or "
+                    f"a second copy of SARA FM / BPQ32), and Winlink sessions will stall. Point only one "
+                    f"of them at this port; Winlink Express can connect through BPQ32 instead.")
+        self._safe_status(msg)
 
     def _refuse(self, client: socket.socket, msg: str):
         try:
@@ -465,7 +502,11 @@ class BpqBridge:
             if self._client_sock is sock:
                 self._client_sock = None
                 self._client_ip = None      # free for a client from any allowed address
-        self._safe_status("KISS client disconnected.")
+                self._client_port = None
+            replaced = sock in self._replaced_socks
+            self._replaced_socks.discard(sock)
+        self._safe_status("KISS client cut off (replaced by the newer connection)." if replaced
+                          else "KISS client disconnected.")
 
 
 # ── network KISS access (v0.7.5) ─────────────────────────────────────────

@@ -25,9 +25,19 @@ Run:
 """
 
 from __future__ import annotations
+import os
+# v0.9.86: numpy's maths library (OpenBLAS) starts one worker thread per core
+# and lets idle workers spin for a while. On a slow 4-core gateway PC (DX1FLR,
+# 0.9.85: decoder peaking at 108% of a core, "decoder waited for a free core")
+# that spinning competes with the sound card. SARA FM's matrices are small,
+# so one thread is as fast and leaves the other cores free. Must be set
+# before numpy is first imported.
+for _v in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_v, "1")
 import collections
 import csv
 import json
+import glob
 import sys
 import os
 import queue
@@ -50,10 +60,12 @@ import session_stats
 import gauges
 import chat
 import chat_window
+import web_ui
 import chat_remote
 from audio_io import AudioEngine, list_devices
 from bpq_bridge import BpqBridge
-from ptt import PTT_VOX, PTT_CM108, PTT_RTS, PTT_DTR, PTTController, enumerate_ra_boards
+from ptt import (PTT_VOX, PTT_CM108, PTT_RTS, PTT_DTR, PTT_PIGPIO, PI_GPIO_DEFAULT_PIN,
+                 PTTController, enumerate_ra_boards)
 
 def app_dir() -> str:
     """Folder to keep logs in: next to SARA-FM.exe when running as the
@@ -377,6 +389,21 @@ class App(tk.Tk):
         self.allow64_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(row, text="Auto may use 64QAM (test)", variable=self.allow64_var,
                         command=self._apply_allow64).pack(side="left", padx=(16, 0))
+        # v0.9.83: more slack for slow PCs that lose sound-card input
+        row = ttk.Frame(link)
+        row.pack(fill="x", padx=4, pady=(0, 3))
+        self.slow_pc_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row, text="Slow PC mode", variable=self.slow_pc_var,
+                        command=self._on_slow_pc_change).pack(side="left")
+        ttk.Label(row, text="  larger audio buffer + lighter window (buffer takes effect at Start)",
+                  foreground="#555").pack(side="left")
+        row = ttk.Frame(link)
+        row.pack(fill="x", padx=4, pady=(0, 3))
+        self.no_coded_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row, text="No C modes", variable=self.no_coded_var,
+                        command=self._on_no_coded_change).pack(side="left")
+        ttk.Label(row, text="  ask other stations not to send 16QAM / 64QAM Wide C here -- only if Slow PC "
+                  "mode is on and 'sound card input lost' still appears", foreground="#555").pack(side="left")
 
         # v0.9.37: SARA FM's own digipeater
         digi = ttk.LabelFrame(sw, text="Digipeater")
@@ -414,7 +441,7 @@ class App(tk.Tk):
         ttk.Label(dev, text="PTT:").grid(row=2, column=0, sticky="w", padx=4, pady=2)
         self.ptt_var = tk.StringVar(value=PTT_VOX)
         ptt_combo = ttk.Combobox(dev, textvariable=self.ptt_var, width=12, state="readonly",
-                                 values=[PTT_VOX, PTT_CM108, PTT_RTS, PTT_DTR])
+                                 values=[PTT_VOX, PTT_CM108, PTT_RTS, PTT_DTR, PTT_PIGPIO])
         ptt_combo.grid(row=2, column=1, sticky="w")
         ptt_combo.bind("<<ComboboxSelected>>", lambda e: self._on_ptt_method_change())
         ttk.Label(dev, text="RA-Board:").grid(row=3, column=0, sticky="w", padx=4, pady=2)
@@ -430,6 +457,20 @@ class App(tk.Tk):
                                            values=["GPIO4 (0x08)", "GPIO3 (0x04)", "GPIO2 (0x02)", "GPIO1 (0x01)"])
         self.gpio_pin_combo.grid(row=4, column=1, sticky="w")
         ttk.Button(dev, text="Test PTT (2s)", command=self._test_ptt).grid(row=4, column=2, sticky="w", padx=4)
+        # v0.9.81: the serial port for RTS / DTR keying (e.g. a Digirig: COM5 on
+        # Windows, /dev/ttyUSB0 on Linux) -- it was never passed on before, so
+        # RTS / DTR could not key anything -- and the Raspberry Pi GPIO pin.
+        ttk.Label(dev, text="Serial port:").grid(row=5, column=0, sticky="w", padx=4, pady=2)
+        self.serial_port_var = tk.StringVar(value="")
+        self.serial_port_combo = ttk.Combobox(dev, textvariable=self.serial_port_var, width=20,
+                                              postcommand=self._refresh_serial_ports)
+        self.serial_port_combo.grid(row=5, column=1, sticky="w")
+        ttk.Label(dev, text="for RTS / DTR", foreground="#555").grid(row=5, column=2, sticky="w", padx=4)
+        ttk.Label(dev, text="Pi GPIO pin:").grid(row=6, column=0, sticky="w", padx=4, pady=2)
+        self.pi_gpio_var = tk.StringVar(value=str(PI_GPIO_DEFAULT_PIN))
+        ttk.Entry(dev, textvariable=self.pi_gpio_var, width=6).grid(row=6, column=1, sticky="w")
+        ttk.Label(dev, text="BCM number, for PTT = Pi GPIO", foreground="#555").grid(
+            row=6, column=2, sticky="w", padx=4)
 
         lv = ttk.LabelFrame(dw, text="Levels and timing")
         lv.pack(fill="x", **pad)
@@ -878,13 +919,92 @@ class App(tk.Tk):
         self._log(f"Levels for {call} ({why}): RX gain {cur['rx_gain_db']:+d} -> {rx:+d} dB, "
                   f"TX level {cur['tx_level_pct']} -> {tx}%  (saved {prof.get('saved', '?')})")
 
-    def _apply_profile_for_peer(self, peer: str):
-        """New Winlink connection: use that station's saved levels, if any."""
-        if self._is_gateway():
+    def _apply_profile_for_peer(self, peer: str, incoming: bool = True):
+        """New Winlink connection: use that station's saved levels, if any.
+        v0.9.87: a gateway keeps one set of levels for its CALLERS only; when
+        this station makes the call itself it uses the levels saved for the
+        station it calls, and goes back to its gateway levels afterwards."""
+        gw = self._is_gateway()
+        if gw and incoming:
+            self._restore_gateway_levels(why=f"{peer} calling in")
             return          # v0.9.78: the same levels for every caller
         t = self._find_target(peer, base_ok=True)
-        if t and t[2]:
-            self._apply_profile(peer, t[2], why="new connection")
+        prof = t[2] if t and t[2] else None
+        src = ""
+        if prof is None:
+            prof, src = self._levels_from_other_installs(peer)
+            if prof is not None:
+                if t is None:
+                    t = [peer.upper(), "", None]
+                    self.targets.append(t)
+                    self.targets.sort(key=lambda x: x[0])
+                t[2] = dict(prof)
+                self._refresh_target_list()
+                self._save_settings()
+                self._log(f"Saved levels for {peer} copied from your other SARA FM folder {src} "
+                          f"(same sound card): RX gain {int(prof['rx_gain_db']):+d} dB, "
+                          f"TX level {int(prof['tx_level_pct'])}%")
+        if prof is None:
+            cur = self._current_profile()
+            self._log(f"No saved levels for {peer} on this PC -- using the current ones "
+                      f"(RX gain {cur['rx_gain_db']:+d} dB, TX level {cur['tx_level_pct']}%). "
+                      f"If the speed stays low, pick {self._base_call(peer)} as Target and run "
+                      f"Auto-Tune once; the levels are then used every time you connect.")
+            return
+        if gw and getattr(self, "_gw_levels", None) is None:
+            self._gw_levels = self._current_profile()
+        self._apply_profile(peer, prof, why="new connection" + (", called from this gateway" if gw else ""))
+
+    def _restore_gateway_levels(self, why: str):
+        """v0.9.87: back to the gateway's own levels after it called out."""
+        prof = getattr(self, "_gw_levels", None)
+        self._gw_levels = None
+        if prof is not None and self._is_gateway():
+            self._apply_profile("gateway", prof, why=why)
+
+    def _levels_from_other_installs(self, peer: str):
+        """v0.9.87: each new version is usually unzipped into a new folder with
+        its own settings file. When this one has no saved levels for `peer`,
+        look in the other SARA FM folders next to it (same sound card only)."""
+        try:
+            here = os.path.normcase(os.path.abspath(self._settings_path()))
+            mine_in = self._dev_name(self.in_dev_var.get())
+            mine_out = self._dev_name(self.out_dev_var.get())
+        except Exception:
+            return None, ""
+        base = os.path.dirname(app_dir())
+        roots = [base, os.path.dirname(base)]
+        found = []
+        for r in roots:
+            for pat in ("*", os.path.join("*", "*")):
+                try:
+                    found += glob.glob(os.path.join(r, pat, self._SETTINGS_FILE))
+                except Exception:
+                    pass
+        best = None
+        for f in set(os.path.normcase(os.path.abspath(x)) for x in found):
+            if f == here:
+                continue
+            try:
+                with open(f) as fh:
+                    st = json.load(fh)
+                mt = os.path.getmtime(f)
+            except (OSError, ValueError):
+                continue
+            if (st.get("input_device", "") or "") != mine_in or (st.get("output_device", "") or "") != mine_out:
+                continue
+            b = self._base_call(peer)
+            for t in st.get("targets") or []:
+                if (isinstance(t, (list, tuple)) and len(t) > 2 and isinstance(t[2], dict)
+                        and self._base_call(str(t[0])) == b
+                        and "rx_gain_db" in t[2] and "tx_level_pct" in t[2]):
+                    if best is None or mt > best[0]:
+                        best = (mt, t[2], os.path.basename(os.path.dirname(os.path.dirname(f)))
+                                if os.path.basename(os.path.dirname(f)).lower() == "sara-fm"
+                                else os.path.basename(os.path.dirname(f)))
+        if best is None:
+            return None, ""
+        return best[1], best[2]
 
     def _save_target(self):
         call = self.target_var.get().split("  --  ", 1)[0].split("   [", 1)[0].strip().upper()
@@ -951,6 +1071,30 @@ class App(tk.Tk):
             self.ra_board_combo.configure(state="disabled")
             self.gpio_pin_combo.configure(state="disabled")
 
+    def _refresh_serial_ports(self):
+        try:
+            self.serial_port_combo["values"] = PTTController.list_serial_ports()
+        except Exception:
+            pass
+
+    def _serial_ptt_kwargs(self, method: str) -> dict | None:
+        """v0.9.81: PTT settings for the RTS / DTR / Pi GPIO methods, or None
+        (after telling the user) if one is missing."""
+        if method in (PTT_RTS, PTT_DTR):
+            port = self.serial_port_var.get().strip()
+            if not port:
+                messagebox.showwarning("Serial port", "Pick the serial port for RTS / DTR PTT "
+                                       "(Settings > Devices > Serial port).")
+                return None
+            return {"port": port}
+        if method == PTT_PIGPIO:
+            try:
+                return {"pi_gpio_pin": int(self.pi_gpio_var.get().strip())}
+            except ValueError:
+                messagebox.showwarning("Pi GPIO pin", "Enter the GPIO pin number (BCM), e.g. 17.")
+                return None
+        return {}
+
     def _refresh_ra_boards(self):
         try:
             self._ra_boards = enumerate_ra_boards()
@@ -985,8 +1129,9 @@ class App(tk.Tk):
         # program on a low-power PC. The daily log file keeps everything.
         try:
             n = int(self.log_box.index("end-1c").split(".")[0])
-            if n > self.LOG_MAX_LINES:
-                self.log_box.delete("1.0", f"{n - self.LOG_KEEP_LINES}.0")
+            lite = getattr(self, "_lite", False)
+            if n > (self.LITE_LOG_MAX if lite else self.LOG_MAX_LINES):
+                self.log_box.delete("1.0", f"{n - (self.LITE_LOG_KEEP if lite else self.LOG_KEEP_LINES)}.0")
         except Exception:
             pass
         sl = getattr(self, "session_log", None)
@@ -1188,6 +1333,13 @@ class App(tk.Tk):
             if stall:
                 diag.append(f"longest window freeze {stall:.1f}s")
             hint = App._health_hint(busy, cpu_used, stall, span, dcpu)
+            if overruns and getattr(self, "engine", None) is not None and \
+                    getattr(self.engine, "rx_buffer_frames", audio_io.RX_BUFFER_FRAMES) < audio_io.RX_BUFFER_FRAMES_LARGE:
+                hint += (" TIP: tick Settings > SARA Setup > 'Slow PC mode', then Stop and Start -- "
+                         "4x more slack for the sound card and a lighter window.")
+            elif overruns and not (getattr(self, "no_coded_var", None) is not None and self.no_coded_var.get()):
+                hint += (" Slow PC mode is already on: if this keeps happening while 'C' mode frames "
+                         "arrive, also tick 'No C modes' (Settings > SARA Setup > Link).")
             self._log("WARNING: this PC is not keeping up with the audio (" + ", ".join(parts)
                       + " in the last 10 s). Frames can be lost. [" + "; ".join(diag) + "] " + hint)
 
@@ -1328,6 +1480,63 @@ class App(tk.Tk):
         return (f"last minute, % of one core: decoder work {pc(dcpu):.0f}%, window {pc(gui):.0f}%, "
                 f"audio/bridge/other {pc(other):.0f}%; decoder waited for a free core {pc(wait):.0f}%")
 
+    def _on_slow_pc_change(self):
+        on = self.slow_pc_var.get()
+        self._apply_lite(on)
+        self._save_settings()
+        self._log(f"Slow PC mode {'ON' if on else 'off'}: audio buffer "
+                  f"{audio_io.RX_BUFFER_FRAMES_LARGE if on else audio_io.RX_BUFFER_FRAMES} samples"
+                  + (", meters 4x a second without needle swing, shorter on-screen log" if on else "")
+                  + (" -- press Stop, then Start, for the buffer." if self.engine is not None else "."))
+
+    # v0.9.83: what Slow PC mode lightens in the window. Field (DV1OTT,
+    # 0.9.79): its window used 13-23% of a core -- more than decoding -- and
+    # froze for up to 0.6 s, while sound-card input was being lost.
+    LITE_POLL_EVERY = 3          # meters, DCD text, status: every 3rd 100 ms poll
+    LITE_LOG_MAX, LITE_LOG_KEEP = 500, 300
+
+    def _apply_caps(self):
+        """v0.9.85: 'No C modes' asks other stations not to send the coded
+        modes here (the most work to decode); they use QPSK Wide / 16QAM
+        Wide instead. Only for PCs that still lose sound-card input."""
+        ls = getattr(self, "link_stats", None)
+        nc = getattr(self, "no_coded_var", None)
+        if ls is not None:
+            off = nc is not None and nc.get()
+            ls.my_caps = link_adapt.MY_CAPS & ~(link_adapt.CAP_CODED if off else 0)
+
+    def _on_no_coded_change(self):
+        self._apply_caps()
+        self._save_settings()
+        self._log("Other stations are now asked NOT to send the coded (C) modes here -- their next "
+                  "link report from this station tells them." if self.no_coded_var.get() else
+                  "Other stations may send the coded (C) modes here again.")
+
+    def _apply_lite(self, on: bool):
+        gauges.AnalogMeter.LITE = bool(on)
+        self._lite = bool(on)
+        self._apply_caps()
+        # Python hands the interpreter between threads every 5 ms by default;
+        # 1 ms lets the sound-card callback in sooner while the decoder or the
+        # window is busy (the callback itself needs well under 1 ms).
+        try:
+            sys.setswitchinterval(0.001 if on else 0.005)
+        except Exception:
+            pass
+        if on:
+            try:
+                n = int(self.log_box.index("end-1c").split(".")[0])
+                if n > self.LITE_LOG_KEEP:
+                    self.log_box.configure(state="normal")
+                    self.log_box.delete("1.0", f"{n - self.LITE_LOG_KEEP}.0")
+                    self.log_box.configure(state="disabled")
+            except Exception:
+                pass
+
+    def _rx_buffer_frames(self) -> int:
+        return (audio_io.RX_BUFFER_FRAMES_LARGE if getattr(self, "slow_pc_var", None) is not None
+                and self.slow_pc_var.get() else audio_io.RX_BUFFER_FRAMES)
+
     @staticmethod
     def _health_hint(busy, cpu_used, stall, span, dcpu=None) -> str:
         """v0.9.43: the likely cause, from where the time went.
@@ -1376,7 +1585,12 @@ class App(tk.Tk):
             self._log(f"Testing PTT: {pin_label} on {self._ra_boards[sel][0]} — "
                        f"watch the radio/LED for 2s...")
         else:
-            self._log(f"Testing PTT via {method} for 2s...")
+            extra = self._serial_ptt_kwargs(method)
+            if extra is None:
+                return
+            kwargs.update(extra)
+            where = extra.get("port") or (f"GPIO {extra['pi_gpio_pin']}" if "pi_gpio_pin" in extra else "")
+            self._log(f"Testing PTT via {method}{' on ' + where if where else ''} for 2s...")
 
         def worker():
             ptt = PTTController(method=method, **kwargs)
@@ -1465,10 +1679,14 @@ class App(tk.Tk):
             "ptt": self.ptt_var.get(),
             "ra_board": self.ra_board_var.get(),
             "gpio_pin": self.gpio_pin_var.get(),
+            "serial_port": self.serial_port_var.get().strip() if hasattr(self, "serial_port_var") else "",
+            "pi_gpio_pin": self.pi_gpio_var.get().strip() if hasattr(self, "pi_gpio_var") else "",
             "tx_delay_ms": self.tx_delay_var.get().strip(),
             "rx_gain_db": self.rx_gain_db_var.get().strip(),
             "tx_level_pct": self.tx_level_var.get().strip(),
             "allow_qam64": bool(self.allow64_var.get()) if hasattr(self, "allow64_var") else True,
+            "slow_pc_buffer": bool(self.slow_pc_var.get()) if hasattr(self, "slow_pc_var") else False,
+            "no_coded_modes": bool(self.no_coded_var.get()) if hasattr(self, "no_coded_var") else False,
             "targets": [list(t) for t in getattr(self, "targets", [])],
             "view": getattr(self, "_view", "full"),
             "gauge_title": self.gauge_title_var.get().strip() if hasattr(self, "gauge_title_var") else "",
@@ -1526,6 +1744,8 @@ class App(tk.Tk):
                   ("modulation", self.modulation_var), ("kiss_port", self.kiss_port_var),
                   ("tx_delay_ms", self.tx_delay_var), ("rx_gain_db", self.rx_gain_db_var),
                   ("tx_level_pct", self.tx_level_var), ("gpio_pin", self.gpio_pin_var)]
+        simple += [(k, getattr(self, a)) for k, a in (("serial_port", "serial_port_var"),   # v0.9.81
+                                                      ("pi_gpio_pin", "pi_gpio_var")) if hasattr(self, a)]
         for key, var in simple:
             if st.get(key) not in (None, ""):
                 var.set(str(st[key]))
@@ -1535,6 +1755,12 @@ class App(tk.Tk):
             self.remote_kiss_var.set(st["remote_kiss"])
         if isinstance(st.get("allow_qam64"), bool) and hasattr(self, "allow64_var"):
             self.allow64_var.set(st["allow_qam64"])
+        if isinstance(st.get("slow_pc_buffer"), bool) and hasattr(self, "slow_pc_var"):
+            self.slow_pc_var.set(st["slow_pc_buffer"])
+            self._apply_lite(st["slow_pc_buffer"])
+        if isinstance(st.get("no_coded_modes"), bool) and hasattr(self, "no_coded_var"):
+            self.no_coded_var.set(st["no_coded_modes"])
+            self._apply_caps()
             self._apply_allow64()
         if st.get("kiss_allow"):
             self.kiss_allow_var.set(st["kiss_allow"])
@@ -1567,7 +1793,7 @@ class App(tk.Tk):
                 self.after(500, self._apply_remote_chat)
         self._select_device(self.in_dev_combo, self.in_dev_var, st.get("input_device", ""), "input")
         self._select_device(self.out_dev_combo, self.out_dev_var, st.get("output_device", ""), "output")
-        if st.get("ptt") in (PTT_VOX, PTT_CM108, PTT_RTS, PTT_DTR):
+        if st.get("ptt") in (PTT_VOX, PTT_CM108, PTT_RTS, PTT_DTR, PTT_PIGPIO):
             self.ptt_var.set(st["ptt"])
             self._on_ptt_method_change()          # runs RA-Board detection for CM108
             saved_board = st.get("ra_board", "")
@@ -1616,11 +1842,20 @@ class App(tk.Tk):
             # "GPIO4 (0x08)" -> 0x08
             pin_label = self.gpio_pin_var.get()
             ptt_kwargs["gpio_pin"] = int(pin_label.split("(")[1].rstrip(")"), 16)
+        else:
+            extra = self._serial_ptt_kwargs(self.ptt_var.get())
+            if extra is None:
+                return
+            ptt_kwargs.update(extra)
         tx_lead_ms = self._apply_tx_delay()
         try:
             t_start = time.time()
             self.engine = AudioEngine(in_idx, out_idx, ptt_method=self.ptt_var.get(),
-                                       ptt_kwargs=ptt_kwargs, tx_lead_ms=tx_lead_ms)
+                                       ptt_kwargs=ptt_kwargs, tx_lead_ms=tx_lead_ms,
+                                       rx_buffer_frames=self._rx_buffer_frames())
+            if self._rx_buffer_frames() != audio_io.RX_BUFFER_FRAMES:
+                self._log(f"Audio buffer: large ({self._rx_buffer_frames()} samples, "
+                          f"{self._rx_buffer_frames() / 48:.0f} ms) -- Slow PC setting.")
             t_ptt = time.time()
             self.engine.start()
             t_audio = time.time()
@@ -1795,6 +2030,7 @@ class App(tk.Tk):
             self.retry_stats.reset()
         elif msg.startswith("KISS client disconnected") or msg.startswith("Stopped"):
             self._kiss_connected = False
+            self._restore_gateway_levels(why="call finished")     # v0.9.87
         if msg.startswith("KISS client disconnected") and (
                 self.rx_meter.total_bytes or self.tx_meter.total_bytes):
             self._log(self._speed_summary())
@@ -1970,6 +2206,7 @@ class App(tk.Tk):
     GARBLED_MIN_PRE_SNR_DB = 18.0
     GARBLED_REASONS = ("fec_uncorrectable", "crc_fail", "low_header_confidence")
     GARBLED_HINT_EVERY_S = 120.0
+    GARBLED_AFTER_OWN_TX_S = 4.0      # v0.9.88: longest frame (BPSK, ~3.4 s) + margin
 
     def _note_garbled(self, reason: str, info: dict):
         """Audio thread. Count strong-but-undecodable frames; hint once in a while."""
@@ -1980,6 +2217,12 @@ class App(tk.Tk):
         if lock is not None and lock.locked():
             return                                        # our own transmission
         now = time.time()
+        # v0.9.88: a frame that was already arriving while this station was
+        # still transmitting lost its start to our own signal -- a collision,
+        # not an overdriven sender. Field (0.9.87, DX1FLR -> DW1IRF-10): every
+        # "won't decode" frame followed one of DW1IRF's own acknowledgments.
+        if now - getattr(self.engine, "_last_tx_end", -1e9) < App.GARBLED_AFTER_OWN_TX_S:
+            return
         hist = getattr(self, "_garbled_t", None)
         if hist is None:
             hist = self._garbled_t = collections.deque(maxlen=8)
@@ -2558,13 +2801,48 @@ class App(tk.Tk):
 
     def _min_clear_s(self, payload: bytes) -> float:
         """v0.9.66: a relay (frames we repeat as digipeater) waits for the
-        sender's whole burst to end -- see AudioEngine._hold_clear."""
+        sender's whole burst to end -- see AudioEngine._hold_clear.
+        v0.9.88: so does any AX.25 transmission while another station is in
+        the middle of sending a window (see _peer_mid_window)."""
         if not payload or payload[0] != bpq_bridge.BATCH_MARKER:
             return 0.0
         frames = bpq_bridge.unpack_batch(payload)
         if frames == [payload] or not frames:
             return 0.0
-        return audio_io.DIGI_MIN_CLEAR_S if any(f in getattr(self, "_relayed", {}) for f in frames) else 0.0
+        if any(f in getattr(self, "_relayed", {}) for f in frames):
+            return audio_io.DIGI_MIN_CLEAR_S
+        return audio_io.DIGI_MIN_CLEAR_S if App._peer_mid_window(self) else 0.0
+
+    # v0.9.88: field (0.9.87, Winlink Express on DX1FLR -> DW1IRF-10, BPSK):
+    # DX1FLR sent 7-frame windows, 3.3 s a frame with 0.2-0.4 s gaps. BPQ32 on
+    # DW1IRF acknowledged each frame as it arrived; SARA FM's carrier sense
+    # read the channel clear in a gap and sent the acknowledgment -- on top of
+    # DX1FLR's next frame, which was lost. Every window needed a REJ and a
+    # resend, Auto dropped DX1FLR to BPSK (longer windows, more gaps), and
+    # both sessions ended before the message got through. The last frame of
+    # a window polls (P bit) or the window ends in silence: until then the
+    # sender isn't done, and a 0.2 s gap isn't the end of its turn.
+    MID_WINDOW_HOLD_S = 6.0          # longest frame (BPSK ~3.4 s) + gap + margin
+
+    def _note_peer_burst(self, ax_frames):
+        """Air frame heard from another station: is its window still going?
+        (an I frame and no poll/final bit on anything in it)"""
+        more = False
+        for f in ax_frames:
+            p = link_adapt.ax25_parse(f)
+            if p is None:
+                continue
+            ctrl = p[2]
+            if ctrl & 0x10:
+                more = False
+                break
+            if ctrl & 0x01 == 0:
+                more = True
+        self._peer_burst = (time.time(), more)
+
+    def _peer_mid_window(self) -> bool:
+        t, more = getattr(self, "_peer_burst", (0.0, False))
+        return more and time.time() - t <= App.MID_WINDOW_HOLD_S
 
     def _tx_filter(self, payload: bytes):
         """Transmit thread, as each queued item is taken to go on the air
@@ -2646,7 +2924,7 @@ class App(tk.Tk):
         last[key] = now
         self.link_stats.reset_peer(peer)
         try:
-            self.after(0, lambda p=peer: self._apply_profile_for_peer(p))   # v0.9.35
+            self.after(0, lambda p=peer, i=incoming: self._apply_profile_for_peer(p, i))   # v0.9.35/0.9.87
         except Exception:
             pass
         if not self._auto():
@@ -3553,6 +3831,10 @@ class App(tk.Tk):
         ax_frames = bpq_bridge.unpack_batch(frame.payload)
         if link_adapt.session_frames(ax_frames):
             self._last_session_activity = time.time()      # v0.9.48: not for UI beacons
+        try:
+            self._note_peer_burst(ax_frames)               # v0.9.88
+        except Exception:
+            pass
         # v0.9.37: frames still on their way through a digipeater, and our own
         # frames repeated back by one, aren't this station's session traffic
         mine = self._my_calls()
@@ -4152,9 +4434,12 @@ class App(tk.Tk):
                     level = self.engine.level_queue.get_nowait()
             except queue.Empty:
                 pass
-            if level is not None:
+            self._lite_n = getattr(self, "_lite_n", 0) + 1
+            ui_now = not getattr(self, "_lite", False) or self._lite_n % self.LITE_POLL_EVERY == 0
+            if level is not None and ui_now:
                 self._update_meter(level)
-            self._update_dcd()
+            if ui_now:
+                self._update_dcd()
             self._ptt_watchdog()
             self._audio_health()
             self._speed_tick += 1
@@ -4193,6 +4478,8 @@ class App(tk.Tk):
             f"Mode:         {v('mode_var')}",
             f"Modulation:   {v('modulation_var')}",
             f"DCD mode:     {v('dcd_mode_var')}",
+            f"Audio buffer: {'large (Slow PC)' if getattr(self, 'slow_pc_var', None) is not None and self.slow_pc_var.get() else 'normal'}"
+            + ("   No C modes: on" if getattr(self, 'no_coded_var', None) is not None and self.no_coded_var.get() else ""),
             f"CPU:          {App._cpu_summary(self) if hasattr(self, '_cpu_hist') else 'not measured yet'}",
             f"Receiver:     {getattr(self, '_frames_seen', 0)} frames decoded this run; candidates turned away: "
             + (", ".join(f"{k} {n}" for k, n in getattr(self, "_reject_counts", collections.Counter()).most_common())
@@ -4201,6 +4488,8 @@ class App(tk.Tk):
                if getattr(self, "_garbled_total", 0) else "")
             + (f"; sound-card clock correction {getattr(self, '_clock_ppm', 0.0):+.0f} ppm"
                if abs(getattr(self, "_clock_ppm", 0.0)) >= 300 else ""),
+            f"Gateway:      {'on (one set of levels for callers)' if App._is_gateway(self) else 'off'}"
+            + f"   saved levels for: {', '.join(t[0] for t in getattr(self, 'targets', []) if len(t) > 2 and t[2]) or 'no stations yet'}",
             f"Digipeater:   {'on' if v('digi_var') in (True, 'True', 1, '1') else 'off'}"
             + (f"   alias: {v('digi_alias_var')}" if v('digi_alias_var') not in ('', None, '?') else ""),
             f"Input device:  {v('in_dev_var')}",
@@ -4381,11 +4670,53 @@ def selftest() -> bool:
     return ok
 
 
+def _arg_value(name: str, default=None):
+    """'--web' -> default, '--web=8081' / '--web 8081' -> '8081', absent -> None."""
+    for i, a in enumerate(sys.argv):
+        if a == name:
+            nxt = sys.argv[i + 1] if i + 1 < len(sys.argv) else ""
+            return nxt if nxt and not nxt.startswith("--") else default
+        if a.startswith(name + "="):
+            return a.split("=", 1)[1]
+    return None
+
+
 def main():
     if "--selftest" in sys.argv:
         sys.exit(0 if selftest() else 1)
+    # v0.9.81: Raspberry Pi / headless. --headless runs with no screen (on a
+    # virtual display) and implies --web; --web[=PORT] serves the phone page
+    # (port 8090 by default since 0.9.82); --autostart presses Start once the
+    # settings are loaded; --mail-port[=3000] adds a Mail button that opens
+    # PAREDN Webmail on the same computer.
+    headless = "--headless" in sys.argv
+    if headless and sys.platform.startswith("linux") and not os.environ.get("DISPLAY") \
+            and not os.environ.get("SARA_FM_XVFB"):
+        import shutil
+        if shutil.which("xvfb-run"):
+            os.environ["SARA_FM_XVFB"] = "1"
+            os.execvp("xvfb-run", ["xvfb-run", "-a", sys.executable] + sys.argv)
+        print("--headless needs a display or xvfb-run (sudo apt install xvfb)")
+        sys.exit(1)
+    web_port = _arg_value("--web", str(web_ui.DEFAULT_PORT))
+    if headless and web_port is None:
+        web_port = str(web_ui.DEFAULT_PORT)
     try:
         app = App()
+        if web_port is not None:
+            try:
+                mail_port = _arg_value("--mail-port", "3000")      # v0.9.82: PAREDN Webmail
+                app.web = web_ui.WebUI(app, port=int(web_port),
+                                       allow=app.kiss_allow_var.get().strip() or "private",
+                                       headless=headless,
+                                       mail_port=int(mail_port) if mail_port and mail_port.isdigit() else None)
+                app.web.start()
+            except Exception as e:
+                app._log(f"Web page could not start on port {web_port}: {e}")
+        if headless:
+            app.withdraw()
+        if "--autostart" in sys.argv:
+            app.after(2500, lambda: app.engine is None and app._toggle_connect())
         app.mainloop()
     except Exception:
         # If it fails to start on a remote gateway, leave the error where a

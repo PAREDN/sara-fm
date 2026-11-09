@@ -298,7 +298,7 @@ New features are added so that older receivers either ignore them or reject them
 ### Before publishing
 
 - [x] License chosen: GPL-3.0-or-later for the code, CC BY 4.0 for this specification
-- [ ] Publish the repository and add its address here
+- [x] Repository: [github.com/PAREDN/sara-fm](https://github.com/PAREDN/sara-fm)
 - [x] Test vectors: 20 recordings in `test-vectors/` (every mode clean and with noise, multi-block Reed-Solomon, ping, pong, chat, batch with link report), each with its bytes at every coding stage; `test-vectors/verify.py` checks them
 - [ ] Have a second person check sections 3–5 against the code and the test vectors
 

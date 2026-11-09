@@ -860,6 +860,11 @@ class RxStats:
         self._lock = threading.RLock()
         self.peers: dict[str, _PeerRx] = {}
         self._last_peer = None
+        # v0.9.85: what this station tells others it can decode. Slow PC mode
+        # leaves out the coded modes (CAP_CODED): field (DX1FLR, 0.9.84) its
+        # PC lost sound-card input only while 16QAM Wide C frames arrived --
+        # those take this decoder ~2x the work of QPSK Wide per second of air.
+        self.my_caps = MY_CAPS
 
     @_locked
     def on_frame(self, src: str, modulation: int, snr_db, fec_corrected: int, payload_len: int,
@@ -901,7 +906,7 @@ class RxStats:
         p = self.peers.get(peer)
         if p is None or (p.n_ok + p.n_bad) == 0 or p.mode < 0:
             return None
-        r = Report(mode=p.mode, n_ok=p.n_ok, n_bad=p.n_bad, caps=MY_CAPS,
+        r = Report(mode=p.mode, n_ok=p.n_ok, n_bad=p.n_bad, caps=self.my_caps,
                    snr_db=int(round(statistics.median(p.snrs))) if p.snrs else -128,
                    fec_max_pct=int(round(max(p.fec_pcts))) if p.fec_pcts else 0,
                    fec_avg_pct=int(round(sum(p.fec_pcts) / len(p.fec_pcts))) if p.fec_pcts else 0,

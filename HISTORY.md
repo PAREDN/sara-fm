@@ -166,6 +166,206 @@ by `test_offline.py`, including a full software-only round trip
 (KISS frame → OFDM air link → KISS frame again) with no BPQ32, radio,
 or network required to verify the whole chain.
 
+## v0.9.88 — don't answer in the gaps of the other station's window
+
+Field: Winlink Express on DW1IRF's PC used DX1FLR's radio over Tailscale
+(KISS TCP) to send to the DW1IRF-10 gateway. DX1FLR sent 7-frame windows
+with 0.2-0.4 s gaps between frames. BPQ32 at the gateway acknowledged each
+frame as it arrived. The gateway's SARA FM read the channel clear in a gap
+and sent the acknowledgment on top of DX1FLR's next frame, which was lost.
+Every window needed a REJ and a resend, Auto dropped DX1FLR to BPSK (longer
+windows, more gaps), and both sessions ended before the message went
+through. All 8 lost frames came right after one of the gateway's own
+transmissions.
+
+- When the last frame heard from another station is an I frame with no
+  poll bit, that station's window isn't over. Our next AX.25 transmission
+  now waits for 1.2 s of continuous clear channel, as digipeater relays
+  already do (0.9.66), instead of the first clear moment. A window that
+  ends with a poll (RR p, or an I frame with P) is answered at once as
+  before. The hold lapses 6 s after the last frame heard.
+- A strong frame that won't decode within 4 s of this station's own
+  transmission no longer counts toward the "OVERDRIVEN transmitter" note.
+  It was a collision, and the note told DX1FLR to lower a TX level that
+  was fine.
+
+## v0.9.87 — saved levels for the station you call
+
+Field: DW1IRF called DX1FLR-10 on 0.9.86 and the session ran at DV1UK's
+levels (TX 14%, RX gain 26). DX1FLR heard DW1IRF at S/N 15-17 dB instead
+of the usual 22-25 dB, and DW1IRF received DX1FLR at -1 dBFS (too hot).
+So Auto stayed in narrow QPSK for most of the session: 5.2 kB took 1:19.
+The cause was that the new 0.9.86 folder's settings file had no levels
+saved for DX1FLR. DX1FLR's own 0.9.86 report was clean: no lost audio, and
+the decoder peaked at 40% of a core (it was 108% before).
+
+- A station with "This station is a gateway" ticked now uses the saved
+  levels for the station it CALLS. When the call finishes, or the next
+  caller connects, it goes back to its gateway levels. Callers still always
+  get the gateway levels.
+- When there are no saved levels for the station on a new connection, the
+  log says so and suggests running Auto-Tune once.
+- When this folder has no saved levels for that station, SARA FM looks in
+  the other SARA FM folders next to it (an older version's folder in
+  Downloads, say). If one with the same sound card has levels saved for
+  that station, it copies them in and uses them, and logs where they came
+  from.
+- The station report shows a "Gateway:" line and which stations have
+  saved levels.
+
+## v0.9.86 — numpy's maths library on one thread
+
+Field: DX1FLR on 0.9.85, with Slow PC mode on, now decoded ten 16QAM Wide C
+frames in a row (about 5 kB) where 0.9.84 lost the first C burst. A 5.2 kB
+message arrived intact. There was still one sound-card input loss per
+session; when that loss hits a C frame, BPQ32 resends the whole 7-frame
+window. The report showed the decoder peaking at 108% of a core and
+"waiting for a free core". No change on the air.
+
+- **numpy's maths library (OpenBLAS) now runs on one thread.** By default it
+  starts a worker thread for every core, and idle workers spin for a while,
+  competing with the sound card on a slow 4-core PC. SARA FM's matrices are
+  small, so one thread is just as fast and leaves the other cores free.
+
+## v0.9.85 — coded modes decode at half the CPU; optional "No C modes"
+
+Field: DX1FLR on 0.9.84, with Slow PC mode on, still lost sound-card input,
+but only while 16QAM Wide C frames were arriving. The QPSK Wide frames that
+followed decoded cleanly. No change on the air.
+
+- **Faster Viterbi decoder.** The branch metrics are worked out in two matrix
+  products up front, the adds are done in place, and the path metrics are
+  renormalised every 64 steps instead of every step. It gives the same
+  output as before: a new test checks this at both code rates, from clean to
+  very noisy, and all 20 test vectors still pass. Measured decode cost for
+  one 632-byte frame:
+
+  | Mode | Before | After |
+  | --- | --- | --- |
+  | 16QAM Wide C | 157 ms | 77 ms |
+  | QPSK Wide | 70 ms | 69 ms |
+
+  So a C-mode frame now costs about what a QPSK Wide frame costs, where
+  before it was twice as much.
+- **"No C modes"** (Settings > SARA Setup > Link, also on the phone page) is
+  the last resort for a PC that still can't keep up. This station stops
+  announcing that it decodes the coded modes, so other stations send it QPSK
+  Wide / 16QAM Wide instead; a sender already in a C mode steps down on the
+  next report. It's off by default. The "not keeping up" warning suggests it
+  when Slow PC mode is already on.
+
+## v0.9.84 — Slow PC mode lightens the window; hide the window and run from the phone
+
+Field: with 0.9.83 and most other programs closed, DV1OTT and the DX1FLR
+gateway still warned "not keeping up". DV1OTT's own numbers showed the SARA
+FM window using 13–23% of a core, more than decoding, and freezing for up to
+0.6 s. No change on the air.
+
+- **"Slow PC mode"** (the 0.9.83 checkbox, renamed) now also:
+  - redraws the meters 4 times a second with no needle swing, instead of 15
+  - updates the meters, lamps and DCD text 3 times a second
+  - keeps 500 lines in the on-screen log instead of 3,000 (the log files
+    still keep everything)
+  - lets the sound card's callback get the processor sooner when the
+    decoder or the window is busy (Python thread switch interval 1 ms)
+
+  Measured on a test PC with the window busy: the window's cost dropped
+  from 3.3% to 2.3% of a core.
+- **Hidden window on Windows:** start `SARA-FM.exe --headless --autostart`. It runs with
+  no window, and the phone page on port 8090 controls it. Measured: 1.5% of
+  a core, less than half of the normal window. The page's Setup tab has
+  "Show / Hide window on the PC" and "Close SARA FM".
+- `QUICKSTART_GATEWAY.txt` §14 lists the steps for a slow gateway PC: Slow PC
+  mode, then hidden window, then a Pi.
+
+## v0.9.83 — slow PCs: larger audio buffer; KISS port takeover warning
+
+Field test DV1OTT ↔ DU3FS (0.9.79). The radio link was clean: DU3FS → DV1OTT
+data carriers at 15–19 dB, and Tune approved both ways. Transfers still ran
+at only 600–1,086 bps, and one message failed twice. No change on the air.
+
+- **Slow PC: larger audio buffer** (Settings > SARA Setup > Link, also on the
+  phone page). DV1OTT's PC lost sound-card input 1–6 times every 10 s while
+  frames were arriving: its decoder was 30–48% busy where DU3FS's was 2–3%,
+  with window freezes up to 0.6 s. Frames arrived with S/N 25–30 dB and still
+  failed, with phase jumps of 50–175° where audio was missing. Each loss made
+  BPQ32 resend the rest of its window (14–19 frames per session), and Auto
+  bounced between 16QAM Wide C and QPSK Wide.
+  - The new setting gives the sound card 4× the slack (341 ms instead of
+    85 ms).
+  - The "not keeping up" warning now suggests it when input was lost.
+  - The station report shows which buffer is in use.
+  - The cost: the level meter and carrier sense see audio up to a third of
+    a second later.
+- **KISS port takeover is reported.** At DU3FS, two programs kept connecting
+  to the same KISS port. Each new connection silently replaced the last, so
+  the program running a Winlink session was cut off mid-session, and the far
+  end's polls went unanswered. Now:
+  - the log says when a new connection takes over the port
+  - the old one is logged as "cut off (replaced)"
+  - two or more takeovers within 2 minutes say that two programs are taking
+    turns, and how to fix it
+
+## v0.9.82 — Raspberry Pi go-kit mail: LinBPQ + PAREDN Webmail
+
+PAREDN Webmail on a phone was preferred over Pat and RadioMail, so the Pi
+go-kit now uses the same setup as PAREDN's BPQ32 stations: LinBPQ keeps the
+mailbox and PAREDN Webmail is the phone's mail page. No change on the air.
+
+- **`pi/install_linbpq.sh CALL`** does three things:
+  - downloads G8BPQ's LinBPQ, adding the 32-bit libraries it needs on 64-bit
+    Raspberry Pi OS
+  - writes a starter `bpq32.cfg` (only if there is none) with the node, the
+    BBS, web pages on 8080, and the SARA FM port as in `BPQ32.cfg.example`.
+    Passwords are left as CHANGEME.
+  - makes LinBPQ start at boot after SARA FM
+- **The phone page moved to port 8090** (`--web`, the Pi service) because
+  8080 is BPQ32's / LinBPQ's own web port; field (K6IRF): it clashed with the
+  BPQ32 node.
+- **Mail button** on SARA FM's page (`--mail-port=3000`, on by default on the
+  Pi) opens PAREDN Webmail on the same computer.
+- **`docs/RASPBERRY_PI.md`** has a new section on LinBPQ + PAREDN Webmail,
+  with the port plan: SARA FM 8090, Webmail 3000, LinBPQ 8080, KISS 8105.
+- PAREDN Webmail itself goes to 1.4.0 so it runs on Linux too. It is a
+  separate package.
+
+## v0.9.81 — Raspberry Pi: runs with no screen, run from a phone
+
+For low-power go-kits and small gateways. No change on the air.
+
+- **Phone web page** (`web_ui.py`). `--web` serves a page on port 8080 with
+  everything needed in the field:
+  - the RX level, S/N and speed meters and the TX / RX / DCD / TCP lamps
+  - the Tune answer, and the Start, Ping, Tune, Tune 10 s and TX anyway buttons
+  - the target station
+  - SARA Chat: direct messages, the NET room, CQ and check-in
+  - the live log
+  - Setup: callsign, levels, devices, PTT, DCD mode, gateway, digipeater
+
+  Access follows the KISS "Allow from" rule (private addresses by default),
+  with no password, like KISS. The page never touches the window from its own
+  threads: the window takes a snapshot every 0.5 s and runs the page's
+  actions itself, as 0.9.77 requires.
+- **`--headless`** runs SARA FM on a virtual display (xvfb) with the web page,
+  and turns dialog boxes into notices on the page. Unattended, a dialog box
+  would otherwise wait forever and stop the program. **`--autostart`** presses
+  Start once the settings are loaded.
+- **PTT:**
+  - **Pi GPIO**: a Raspberry Pi pin keys the radio through a transistor or
+    opto-isolator.
+  - **Serial port** setting for RTS / DTR, e.g. a Digirig on `/dev/ttyUSB0`
+    or COM5. Fix: until now RTS / DTR never got a port, so they could not key
+    anything.
+- **`pi/install_pi.sh`** installs everything on Raspberry Pi OS Bookworm:
+  - packages, plus USB-PTT, serial and GPIO permissions
+  - the self-test
+  - a `sara-fm` service that starts at boot
+- **`pi/pat_ax25.sh`** attaches SARA FM to the Linux AX.25 stack for Pat.
+- **`docs/RASPBERRY_PI.md`**: the guide, with LinBPQ (same configuration as
+  BPQ32), Pat, and the Pi's own Wi-Fi hotspot for the field.
+- Not yet tested on a real Pi. The modem code is unchanged, and the web page,
+  headless mode and installer scripts were tested on Linux.
+
 ## v0.9.80 — open source: GPL v3, protocol specification, test vectors
 
 No change on the air: 0.9.80 talks to 0.9.79 and earlier exactly as before.

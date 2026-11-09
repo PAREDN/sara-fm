@@ -25,6 +25,8 @@ check and improve it.
   sessions.
 - **SARA Chat**: keyboard chat and file transfer between stations, also usable
   from another computer over the network.
+- **Phone web page** and a **Raspberry Pi** headless mode for low-power
+  go-kits.
 - **One-button Tune** that sets audio levels between two stations.
 
 ## Getting started
@@ -41,8 +43,12 @@ check and improve it.
 
   Run the offline tests first with `python test_offline.py`.
 
-Linux runs the modem and the tests. Linux PTT and audio setup are not yet
-documented.
+- **Raspberry Pi (go-kits, small gateways):** runs with no screen, operated
+  from a web page on your phone. Run `bash pi/install_pi.sh` and see
+  [`docs/RASPBERRY_PI.md`](docs/RASPBERRY_PI.md). Mail comes from LinBPQ and
+  PAREDN Webmail on the phone (`pi/install_linbpq.sh`). Pat also works.
+- **Any computer:** add `--web` to also get the phone page, e.g.
+  `python sara_pingpong.py --web`.
 
 ## Documentation
 
@@ -50,6 +56,7 @@ documented.
 | --- | --- |
 | [`docs/SPEC.md`](docs/SPEC.md) | SARA FM Protocol Specification: everything needed to build a compatible modem |
 | [`QUICKSTART_GATEWAY.txt`](QUICKSTART_GATEWAY.txt) | Setting up a gateway or client station |
+| [`docs/RASPBERRY_PI.md`](docs/RASPBERRY_PI.md) | Raspberry Pi install, phone web page, LinBPQ and Pat |
 | [`BPQ32.cfg.example`](BPQ32.cfg.example) | BPQ32 port configuration |
 | [`test-vectors/`](test-vectors/) | Reference recordings with their decoded bytes, for checking other implementations |
 | [`HISTORY.md`](HISTORY.md) | Version-by-version development history and field-test notes |
@@ -64,7 +71,9 @@ documented.
 | `bpq_bridge.py`, `kiss.py` | KISS TCP server and AX.25 batching |
 | `link_adapt.py` | Link reports, speed control, digipeater handling |
 | `chat.py`, `chat_remote.py`, `chat_window.py` | SARA Chat |
-| `audio_io.py`, `ptt.py` | Sound card and PTT (CM108, serial RTS/DTR, VOX) |
+| `audio_io.py`, `ptt.py` | Sound card and PTT (CM108, serial RTS/DTR, Pi GPIO, VOX) |
+| `web_ui.py` | Phone web page (`--web`, `--headless`) |
+| `pi/` | Raspberry Pi installers (SARA FM, LinBPQ) and Pat helper |
 | `tuning.py` | Level and S/N guidance for Tune |
 | `sara_pingpong.py` | The application window |
 | `test_offline.py` | Offline test suite (no radio needed) |

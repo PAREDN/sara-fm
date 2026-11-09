@@ -18,6 +18,10 @@ PTT_RTS    = "RTS"
 PTT_DTR    = "DTR"
 PTT_CM108  = "CM108"
 PTT_HAMLIB = "HAMLIB"
+# v0.9.81: a Raspberry Pi GPIO pin keying the radio (through a transistor or
+# opto-isolator), for go-kits with no USB interface PTT. BCM pin numbers.
+PTT_PIGPIO = "Pi GPIO"
+PI_GPIO_DEFAULT_PIN = 17
 
 # Confirmed GPIO pin for CM108B PID=0x013c
 CM108_GPIO_PIN = 0x04
@@ -242,13 +246,28 @@ class CM108PTT:
         return self._keyed
 
 
+def open_pi_gpio(pin: int):
+    """v0.9.81: a Raspberry Pi output pin, LOW (unkeyed) to start. Uses
+    gpiozero, which ships with Raspberry Pi OS (sudo apt install
+    python3-gpiozero elsewhere). Returns an object with on() / off() / close()."""
+    try:
+        from gpiozero import OutputDevice
+    except ImportError:
+        raise RuntimeError("Pi GPIO PTT needs gpiozero: sudo apt install python3-gpiozero")
+    try:
+        return OutputDevice(int(pin), active_high=True, initial_value=False)
+    except Exception as e:
+        raise RuntimeError(f"Cannot use GPIO {pin} for PTT: {e} "
+                           f"(is this a Raspberry Pi, and is the user in the 'gpio' group?)")
+
+
 class PTTController:
     """Universal PTT controller — VOX, RTS, DTR, CM108, HAMLIB."""
 
     def __init__(self, method=PTT_VOX, port=None, baudrate=9600,
                  ra_board_path=None, gpio_pin=CM108_GPIO_PIN,
                  hamlib_host="127.0.0.1", hamlib_port=4532,
-                 tx_delay_ms=0, tail_ms=0):
+                 tx_delay_ms=0, tail_ms=0, pi_gpio_pin=PI_GPIO_DEFAULT_PIN):
         self.method       = method
         self.port         = port
         self.baudrate     = baudrate
@@ -264,6 +283,8 @@ class PTTController:
         self._serial      = None
         self._hamlib      = None
         self._cm108       = None
+        self.pi_gpio_pin  = pi_gpio_pin
+        self._gpio        = None
 
     def open(self):
         if self.method == PTT_VOX:
@@ -286,6 +307,10 @@ class PTTController:
             self._cm108 = CM108PTT(path=self.ra_path,
                                    gpio_pin=self.gpio_pin)
             self._cm108.open()
+            return True
+
+        if self.method == PTT_PIGPIO:
+            self._gpio = open_pi_gpio(self.pi_gpio_pin)
             return True
 
         if self.method == PTT_HAMLIB:
@@ -313,6 +338,10 @@ class PTTController:
             try: self._hamlib.close()
             except Exception: pass
             self._hamlib = None
+        if self._gpio:
+            try: self._gpio.close()
+            except Exception: pass
+            self._gpio = None
 
     def ptt_on(self):
         with self._lock:
@@ -327,6 +356,8 @@ class PTTController:
                 self._serial.dtr = True
             elif self.method == PTT_CM108 and self._cm108:
                 self._cm108.ptt_on()
+            elif self.method == PTT_PIGPIO and self._gpio:
+                self._gpio.on()
             elif self.method == PTT_HAMLIB and self._hamlib:
                 try: self._hamlib.sendall(b"T 1\n")
                 except Exception: pass
@@ -347,6 +378,8 @@ class PTTController:
                     self._serial.dtr = False
                 elif self.method == PTT_CM108 and self._cm108:
                     self._cm108.ptt_off()
+                elif self.method == PTT_PIGPIO and self._gpio:
+                    self._gpio.off()
                 elif self.method == PTT_HAMLIB and self._hamlib:
                     try: self._hamlib.sendall(b"T 0\n")
                     except Exception: pass

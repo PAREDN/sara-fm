@@ -278,7 +278,20 @@ SARA-PP -- Gateway Quick Start (standalone Windows version, no Python needed)
    - If the log says "WARNING: this PC is not keeping up with the audio",
      frames are being lost on THIS PC, not on the radio path: close other
      busy programs; on a laptop plug in the charger and choose a High
-     performance power plan.
+     performance power plan. If it keeps happening (old or low-power
+     gateway PC), in this order:
+       1. Settings > SARA Setup > Link: tick "Slow PC mode" (larger audio
+          buffer, lighter window), then Stop and Start.
+       2. Run SARA FM with its window hidden: make a shortcut to
+          SARA-FM.exe ending in  --headless --autostart  and start it from that.
+          There is no window; open http://<this PC>:8090/ on a phone or
+          another PC to watch and control it (Setup tab: "Show window on
+          the PC" brings the window back, "Close SARA FM" quits).
+       3. If the warning still appears while 16QAM/64QAM Wide C frames
+          arrive, also tick "No C modes" (same place): other stations then
+          send this PC the cheaper QPSK Wide / 16QAM Wide instead.
+       4. If the warning still appears, the PC is too slow for a gateway;
+          a Raspberry Pi 4 is a cheap replacement (docs/RASPBERRY_PI.md).
 
 15. DIGIPEATER (v0.9.37+)
    A station in the middle can relay for two stations that can't hear
