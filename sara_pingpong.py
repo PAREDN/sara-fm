@@ -60,6 +60,9 @@ import session_stats
 import gauges
 import chat
 import chat_window
+import ax25_term          # v0.9.90: SARA Terminal
+import term_window
+import update_check      # v0.9.96: new-version notice
 import web_ui
 import chat_remote
 from audio_io import AudioEngine, list_devices
@@ -342,13 +345,24 @@ class App(tk.Tk):
         self.kiss_allow_entry = ttk.Entry(row2, textvariable=self.kiss_allow_var, width=20)
         self.kiss_allow_entry.pack(side="left", padx=4)
         ttk.Label(bridge, text="The bridge runs whenever the modem is started; port and network "
-                               "changes take effect at the next Start.", foreground="#555").pack(
+                               "changes restart SARA FM when you close this window.", foreground="#555").pack(
             anchor="w", padx=4, pady=(0, 3))
         # v0.9.78: a gateway keeps one set of audio levels for every caller
         self.gateway_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(bridge, text="This station is a gateway: one set of audio levels for every "
                                      "caller (callers tune to it)", variable=self.gateway_var,
                         command=self._on_gateway_change).pack(anchor="w", padx=4, pady=(0, 3))
+        # v0.9.96: like VARA FM -- say when a newer SARA FM is out
+        self.update_check_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(bridge, text="Check for a new SARA FM version when it starts (needs internet; "
+                                     "nothing is sent but the version number)",
+                        variable=self.update_check_var, command=self._save_settings).pack(anchor="w", padx=4,
+                                                                                         pady=(0, 3))
+        if sys.platform == "win32":                        # v0.9.89; here since v0.9.93
+            self.win_start_var = tk.BooleanVar(value=os.path.exists(self._startup_link_path()))
+            ttk.Checkbutton(bridge, text="Start SARA FM with Windows (it starts the modem by itself)",
+                            variable=self.win_start_var,
+                            command=self._toggle_start_with_windows).pack(anchor="w", padx=4, pady=(0, 3))
 
         # v0.9.75: SARA Chat over the network, like VARA Chat with VARA FM
         rc = ttk.LabelFrame(sw, text="SARA Chat over the network")
@@ -457,6 +471,10 @@ class App(tk.Tk):
                                            values=["GPIO4 (0x08)", "GPIO3 (0x04)", "GPIO2 (0x02)", "GPIO1 (0x01)"])
         self.gpio_pin_combo.grid(row=4, column=1, sticky="w")
         ttk.Button(dev, text="Test PTT (2s)", command=self._test_ptt).grid(row=4, column=2, sticky="w", padx=4)
+        # v0.9.93: the 10-second test tone (was TUNE 10s on the main window) lives
+        # here now, beside Test PTT -- the other station watches its RX meter
+        ttk.Button(dev, text="Test tone (10 s)", command=self._test_tone).grid(row=4, column=3, sticky="w",
+                                                                              padx=4)
         # v0.9.81: the serial port for RTS / DTR keying (e.g. a Digirig: COM5 on
         # Windows, /dev/ttyUSB0 on Linux) -- it was never passed on before, so
         # RTS / DTR could not key anything -- and the Raspberry Pi GPIO pin.
@@ -511,7 +529,12 @@ class App(tk.Tk):
         self.meter_bar = self.meter.create_rectangle(0, 4, 0, 12, fill="green", outline="")
         self.rx_meter_var = tk.StringVar(value="")
         ttk.Label(meter_frame, textvariable=self.rx_meter_var, width=42).pack(side="left")
-        ttk.Button(dw, text="Close", command=lambda: self._close_dialog(dw)).pack(anchor="e", **pad)
+        dbtn = ttk.Frame(dw)
+        dbtn.pack(fill="x", **pad)
+        ttk.Button(dbtn, text="Close", command=lambda: self._close_dialog(dw)).pack(side="right")
+        # v0.9.93: moved here from the Settings menu -- e.g. after replugging the RA-Board
+        ttk.Button(dbtn, text="Restart SARA FM",
+                   command=lambda: self._restart(why="Restart from Settings > Devices")).pack(side="right", padx=6)
 
         # ── Main window ──────────────────────────────────────────────
         # v0.9.34: two views, like VARA FM. "Gauges only" is a short strip
@@ -519,20 +542,17 @@ class App(tk.Tk):
         # window; "Full" adds the target row, buttons, Auto-Tune bar and log.
         self._full_only = []            # (widget, pack options), in screen order
         head = ttk.Frame(self)
-        # v0.9.32: Target is a list of stations (callsign + location)
-        ttk.Label(head, text="Target:").grid(row=0, column=0, sticky="w")
+        # v0.9.32: Target is a list of stations (callsign + location).
+        # v0.9.95: picked, located, saved and removed in the Ping window (Ping on
+        # the menu bar or PING here), so it works from the Gauges-only view too;
+        # the combobox below is the list behind it and is not shown here.
         self.target_var = tk.StringVar(value="*")
         self.targets: list = [[c, "", None] for c in self.DEFAULT_TARGETS]
         self.target_combo = ttk.Combobox(head, textvariable=self.target_var, width=14)
-        self.target_combo.grid(row=0, column=1, sticky="w", padx=(4, 0))
         self.target_combo.bind("<<ComboboxSelected>>", lambda e: self._on_target_selected())
         self.target_var.trace_add("write", lambda *a: self._show_target_location())
         self.target_loc_var = tk.StringVar(value="")
-        ttk.Label(head, text="Location:").grid(row=0, column=2, sticky="w", padx=(12, 0))
-        ttk.Entry(head, textvariable=self.target_loc_var, width=22).grid(row=0, column=3, sticky="w", padx=4)
-        ttk.Button(head, text="Save", width=6, command=self._save_target).grid(row=0, column=4, padx=(0, 2))
-        ttk.Button(head, text="Remove", width=8, command=self._remove_target).grid(row=0, column=5)
-        ttk.Label(head, text="Modulation:").grid(row=0, column=6, sticky="w", padx=(16, 0))
+        ttk.Label(head, text="Modulation:").grid(row=0, column=6, sticky="w", padx=(0, 0))
         self.modulation_var = tk.StringVar(value="Auto")      # v0.9.32: default Auto
         ttk.Combobox(head, textvariable=self.modulation_var, width=12, state="readonly",
                      values=["Auto", "BPSK", "QPSK", "QPSK Wide", "16QAM Wide C", "16QAM Wide",
@@ -540,8 +560,6 @@ class App(tk.Tk):
         self.modulation_var.trace_add("write", lambda *a: setattr(self, "_mod_choice", self.modulation_var.get()))
         # v0.9.35: this station's saved audio levels (Auto-Tune saves them)
         self.target_prof_var = tk.StringVar(value="")
-        ttk.Label(head, textvariable=self.target_prof_var, foreground="#555").grid(
-            row=1, column=1, columnspan=7, sticky="w", padx=(4, 0), pady=(2, 0))
         self._refresh_target_list()
         self._full_only.append((head, dict(fill="x", **pad)))
 
@@ -597,22 +615,24 @@ class App(tk.Tk):
         self._full_only.append((speed, dict(fill="x", **pad)))
 
         ctrl = ttk.Frame(self)
+        # v0.9.89: no Start button -- SARA FM starts by itself when it opens,
+        # like VARA FM, and restarts by itself after a sound card / PTT / KISS
+        # port change (Settings > Restart SARA FM does it by hand). The button
+        # object stays (not shown) for code that updates its label.
         self.connect_btn = ttk.Button(ctrl, text="Start", command=self._toggle_connect)
-        self.connect_btn.pack(side="left")
+        # v0.9.96: no button row on the main window -- Ping and Chat are on the
+        # menu bar. The buttons stay (not shown) for code that updates them.
         self.ping_btn = ttk.Button(ctrl, text="PING", command=self._send_ping, state="disabled")
-        self.ping_btn.pack(side="left", padx=8)
         # v0.9.78: ONE Tune button (RX gain, then TX level) ending in one
         # verdict, like VARA FM's drive calibration. "Tune TX level only" is
         # in the Settings menu.
+        # v0.9.93: Tune / TUNE 10s left the main window -- PING opens the Ping
+        # window, which has Auto-Tune, the station picker and level sliders
         self.autotune_btn = ttk.Button(ctrl, text="Tune", command=self._start_autotune, state="disabled")
-        self.autotune_btn.pack(side="left", padx=(0, 8))
         # v0.9.14: find the loudest TX level the other station still receives clean
         self.txtune_btn = ttk.Button(ctrl, text="Tune TX", command=self._start_txtune, state="disabled")
         self.tune_btn = ttk.Button(ctrl, text="TUNE 10s", command=self._start_tune, state="disabled")
-        self.tune_btn.pack(side="left", padx=(0, 8))
         self.chat_btn = ttk.Button(ctrl, text="Chat", command=self.open_chat)     # v0.9.38
-        self.chat_btn.pack(side="right")
-        self._full_only.append((ctrl, dict(fill="x", **pad)))
 
         # v0.9.32: Auto-Tune / Tune TX status in large type
         self.tune_status_var = tk.StringVar(value="")
@@ -626,8 +646,9 @@ class App(tk.Tk):
         self.tune_status_lbl = tk.Label(self, textvariable=self.tune_status_var, anchor="w",
                                         font=big, padx=10, pady=6, justify="left", wraplength=880,
                                         bg=self.TUNE_COLORS["idle"][0], fg=self.TUNE_COLORS["idle"][1])
-        self._full_only.append((self.tune_status_lbl, dict(fill="x", padx=8, pady=(0, 4))))
-        self._set_tune_status("idle", "Tune: not run yet -- pick a Target and press Tune.")
+        # v0.9.96: the big Tune banner is no longer shown -- the Ping window and
+        # the log carry Auto-Tune's result; the status bar shows it while it runs
+        self._set_tune_status("idle", "")
 
         self.verbose_rx_var = tk.BooleanVar(value=False)     # Log menu
         self.log_box = scrolledtext.ScrolledText(self, height=12, state="disabled", font=("Consolas", 9))
@@ -647,6 +668,11 @@ class App(tk.Tk):
         tk.Label(sb, textvariable=self.sb_tune_var, anchor="w", width=1).pack(side="left", fill="x", expand=True)
         self.sb_mode_var = tk.StringVar(value="")
         tk.Label(sb, textvariable=self.sb_mode_var, anchor="e").pack(side="right", padx=6)
+        # v0.9.96: "A new SARA FM version is available" (shown only when one is)
+        self.update_var = tk.StringVar(value="")
+        self.update_lbl = tk.Label(sb, textvariable=self.update_var, anchor="e", fg="#0b57d0",
+                                   cursor="hand2", font=("TkDefaultFont", 9, "bold underline"))
+        self.update_lbl.bind("<Button-1>", lambda e: self._open_update_page())
         # v0.9.44: CPU meter (like VARA FM's), in both views
         ttk.Separator(sb, orient="vertical").pack(side="right", fill="y", padx=4)
         self.cpu_bar = gauges.CpuBar(sb)
@@ -656,19 +682,22 @@ class App(tk.Tk):
 
     # ── menus and dialogs (v0.9.33) ──────────────────────────────────
     def _build_menu(self):
+        # v0.9.93: laid out like VARA FM for the volunteers --
+        # Settings  View  Ping  Log  Chat  Terminal  Help
         mb = tk.Menu(self)
+        self._menubar = mb
         st = tk.Menu(mb, tearoff=0)
         st.add_command(label="SARA Setup...", command=lambda: self._show_dialog(self.setup_win))
         st.add_command(label="Devices...", command=lambda: self._show_dialog(self.devices_win))
-        st.add_command(label="Tune TX level only", command=self._start_txtune)     # v0.9.78
         mb.add_cascade(label="Settings", menu=st)
         vw = tk.Menu(mb, tearoff=0)
         self.view_var = tk.StringVar(value="full")
         vw.add_radiobutton(label="Full (gauges, buttons and log)", value="full", variable=self.view_var,
                            command=lambda: self._apply_view("full"))
-        vw.add_radiobutton(label="Gauges only (to sit next to VARA FM)", value="gauges",
+        vw.add_radiobutton(label="Gauges only", value="gauges",
                            variable=self.view_var, command=lambda: self._apply_view("gauges"))
         mb.add_cascade(label="View", menu=vw)
+        mb.add_command(label="Ping", command=self._open_ping_window)
         lg = tk.Menu(mb, tearoff=0)
         lg.add_command(label="Save Report (one file for a test run)", command=self._save_report)
         lg.add_command(label="Save Logs (zip of everything)", command=self._save_logs)
@@ -680,19 +709,15 @@ class App(tk.Tk):
         lg.add_command(label="Clear window", command=self._clear_log_window)
         mb.add_cascade(label="Log", menu=lg)
         self._log_menu = lg
-        ch = tk.Menu(mb, tearoff=0)                                  # v0.9.38
-        ch.add_command(label="Open SARA Chat", command=self.open_chat)
-        ch.add_command(label="Call CQ on the NET", command=lambda: self._chat_net("cq"))
-        ch.add_command(label="Check in to the NET", command=lambda: self._chat_net("checkin"))
-        ch.add_separator()
-        ch.add_command(label="Open received files folder",
-                       command=lambda: chat_window._open_path(self._chat_files_dir()))
-        mb.add_cascade(label="Chat", menu=ch)
+        mb.add_command(label="Chat", command=self.open_chat)            # CQ / Check in are in the window
+        self._chat_menu_index = mb.index("end")
+        mb.add_command(label="Terminal", command=self.open_terminal)
         hp = tk.Menu(mb, tearoff=0)
         hp.add_command(label="Quick Start (gateway)", command=lambda: self._open_doc("QUICKSTART_GATEWAY.txt"))
         hp.add_command(label="README", command=lambda: self._open_doc("README.md"))
         hp.add_command(label="Version history", command=lambda: self._open_doc("HISTORY.md"))
         hp.add_separator()
+        hp.add_command(label="Check for a new version", command=lambda: self._check_update(manual=True))
         hp.add_command(label="About SARA FM", command=self._about)
         mb.add_cascade(label="Help", menu=hp)
         self.config(menu=mb)
@@ -755,6 +780,133 @@ class App(tk.Tk):
             self._save_settings()
         except Exception:
             pass
+        try:
+            self._settings_closed()            # v0.9.89
+        except Exception:
+            pass
+
+    # ── runs by itself, like VARA FM (v0.9.89) ───────────────────────
+    def _engine_sig(self) -> tuple:
+        """Everything that only takes effect when the sound card, PTT and KISS
+        port are opened -- a change means a restart."""
+        def g(name):
+            v = getattr(self, name, None)
+            try:
+                return v.get() if v is not None else None
+            except Exception:
+                return None
+        return tuple(g(n) for n in ("call_var", "in_dev_var", "out_dev_var", "ptt_var", "ra_board_var",
+                                    "gpio_pin_var", "serial_port_var", "pi_gpio_var", "kiss_port_var",
+                                    "remote_kiss_var", "kiss_allow_var", "slow_pc_var"))
+
+    def _setup_missing(self) -> str:
+        if not self.call_var.get().strip():
+            return "callsign"
+        try:
+            int(self.in_dev_var.get().split(":")[0])
+            int(self.out_dev_var.get().split(":")[0])
+        except Exception:
+            return "devices"
+        return ""
+
+    def _auto_start(self):
+        """When SARA FM opens: start at once if the station is set up;
+        otherwise open the settings that are missing (no error box)."""
+        if self.engine is not None:
+            return
+        missing = self._setup_missing()
+        if missing == "callsign":
+            self._log("Welcome: enter your callsign in Settings > SARA Setup. "
+                      "SARA FM starts by itself when you close that window.")
+            self._show_dialog(self.setup_win)
+            return
+        if missing == "devices":
+            self._log("Pick the sound card (input and output) and PTT in Settings > Devices. "
+                      "SARA FM starts by itself when you close that window.")
+            self._show_dialog(self.devices_win)
+            return
+        self._connect()
+
+    # v0.9.89: a shortcut in the Windows Startup folder, so a gateway PC has
+    # SARA FM running (and waiting for BPQ32 / Winlink Express) after a reboot
+    STARTUP_LINK = "SARA FM.lnk"
+
+    @staticmethod
+    def _startup_link_path() -> str:
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        return os.path.join(base, "Microsoft", "Windows", "Start Menu", "Programs", "Startup",
+                            App.STARTUP_LINK)
+
+    @staticmethod
+    def _startup_target() -> tuple:
+        """(program, arguments, folder) the shortcut runs."""
+        if getattr(sys, "frozen", False):
+            return sys.executable, "", os.path.dirname(os.path.abspath(sys.executable))
+        exe = sys.executable
+        w = os.path.join(os.path.dirname(exe), "pythonw.exe")
+        script = os.path.abspath(__file__)
+        return (w if os.path.exists(w) else exe), f'"{script}"', os.path.dirname(script)
+
+    def _toggle_start_with_windows(self, run=None):
+        import subprocess
+        link = self._startup_link_path()
+        want = bool(self.win_start_var.get())
+        try:
+            if want:
+                target, args, folder = self._startup_target()
+                q = lambda x: x.replace("'", "''")
+                ps = (f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{q(link)}');"
+                      f"$s.TargetPath='{q(target)}';$s.Arguments='{q(args)}';"
+                      f"$s.WorkingDirectory='{q(folder)}';$s.Save()")
+                (run or subprocess.run)(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                                        check=True, capture_output=True, timeout=20,
+                                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                self._log(f"SARA FM will start with Windows (shortcut: {link}). It starts the "
+                          f"modem by itself and waits for BPQ32 / Winlink Express on KISS port "
+                          f"{self.kiss_port_var.get()}.")
+            else:
+                if os.path.exists(link):
+                    os.remove(link)
+                self._log("SARA FM no longer starts with Windows.")
+        except Exception as e:
+            self.win_start_var.set(not want)
+            self._log(f"Could not {'add' if want else 'remove'} the Windows Startup shortcut: {e}")
+
+    def _restart(self, why: str):
+        self._log(f"{why}: restarting the sound card, PTT and KISS port.")
+        if self.engine is not None:
+            self._disconnect()
+        self._auto_start()
+
+    def _settings_closed(self):
+        """A settings window was closed (or the phone page changed a setting):
+        start if not running yet; restart if something that needs it changed.
+        A Winlink session moving data is left to finish first.
+        v0.9.92: only when SARA FM was opened to run (main() sets _autorun) --
+        field (DW1IRF build test): the offline tests open and close Settings
+        on a PC with a real settings file, sound card and RA-Board, and
+        closing a window started the real modem in the middle of a test."""
+        if not getattr(self, "_autorun", False):
+            return
+        if self.engine is None:
+            if not self._setup_missing():
+                self._auto_start()
+            return
+        if self._engine_sig() == getattr(self, "_run_sig", None):
+            return
+        if self._session_busy():
+            if not getattr(self, "_restart_waiting", False):
+                self._restart_waiting = True
+                self._log("Settings changed: SARA FM restarts when the Winlink session is idle.")
+            self.after(5000, self._retry_pending_restart)
+            return
+        self._restart_waiting = False
+        self._restart(why="Settings changed")
+
+    def _retry_pending_restart(self):
+        if getattr(self, "_restart_waiting", False):
+            self._restart_waiting = False
+            self._settings_closed()
 
     def _toggle_verbose_menu(self):
         self.verbose_rx_var.set(not self.verbose_rx_var.get())
@@ -829,6 +981,13 @@ class App(tk.Tk):
         self._norm_targets()
         self.target_combo["values"] = [self._target_display(c, l, p) for c, l, p in self.targets]
         self._show_target_location()
+        w = getattr(self, "ping_win", None)                 # v0.9.95: the Ping window's list too
+        if w is not None:
+            try:
+                if w.winfo_exists():
+                    w.set_targets(list(self.target_combo["values"]))
+            except Exception:
+                pass
 
     def _find_target(self, call: str, base_ok: bool = False):
         call = call.strip().upper()
@@ -1189,7 +1348,7 @@ class App(tk.Tk):
             self._ptt_wd_warned = now
             self._log("WARNING: PTT release is FAILING -- the radio may be stuck transmitting. "
                       "Check the RA-Board USB cable (RF getting into it?). Retrying every second; "
-                      "if it doesn't clear, press Stop, unplug/replug the RA-Board, and Start again.")
+                      "if it doesn't clear, unplug/replug the RA-Board, then Settings > Devices > Restart SARA FM.")
 
     AUDIO_HEALTH_EVERY_S = 10.0
     # v0.9.53: was 0.5. Field (DX1BBC, Wyse 3040 + 4 VARA FM + BPQ32): 0.5-0.9 s
@@ -1335,7 +1494,7 @@ class App(tk.Tk):
             hint = App._health_hint(busy, cpu_used, stall, span, dcpu)
             if overruns and getattr(self, "engine", None) is not None and \
                     getattr(self.engine, "rx_buffer_frames", audio_io.RX_BUFFER_FRAMES) < audio_io.RX_BUFFER_FRAMES_LARGE:
-                hint += (" TIP: tick Settings > SARA Setup > 'Slow PC mode', then Stop and Start -- "
+                hint += (" TIP: tick Settings > SARA Setup > 'Slow PC mode' and close the window -- "
                          "4x more slack for the sound card and a lighter window.")
             elif overruns and not (getattr(self, "no_coded_var", None) is not None and self.no_coded_var.get()):
                 hint += (" Slow PC mode is already on: if this keeps happening while 'C' mode frames "
@@ -1376,7 +1535,7 @@ class App(tk.Tk):
             return
         self.engine.start_recording(self.RX_RECORD_S)
         self._log(f"Recording {self.RX_RECORD_S:.0f} s of received audio -- ask the other station to "
-                  f"PING you (or press TUNE 10s) now. The file goes to the log folder.")
+                  f"PING you (or send a Test tone) now. The file goes to the log folder.")
 
     def _check_rx_recording(self):
         e = self.engine
@@ -1487,7 +1646,7 @@ class App(tk.Tk):
         self._log(f"Slow PC mode {'ON' if on else 'off'}: audio buffer "
                   f"{audio_io.RX_BUFFER_FRAMES_LARGE if on else audio_io.RX_BUFFER_FRAMES} samples"
                   + (", meters 4x a second without needle swing, shorter on-screen log" if on else "")
-                  + (" -- press Stop, then Start, for the buffer." if self.engine is not None else "."))
+                  + (" -- the buffer changes when you close this window (SARA FM restarts)." if self.engine is not None else "."))
 
     # v0.9.83: what Slow PC mode lightens in the window. Field (DV1OTT,
     # 0.9.79): its window used 13-23% of a core -- more than decoding -- and
@@ -1693,6 +1852,7 @@ class App(tk.Tk):
             "digipeater": bool(self.digi_var.get()) if hasattr(self, "digi_var") else False,
             "digi_alias": self.digi_alias_var.get().strip() if hasattr(self, "digi_alias_var") else "",
             "gateway_direct": bool(self.gw_direct_var.get()) if hasattr(self, "gw_direct_var") else True,
+            "update_check": bool(self.update_check_var.get()) if hasattr(self, "update_check_var") else True,
             "gateway": bool(self.gateway_var.get()) if hasattr(self, "gateway_var") else False,
             "chat_serve": bool(self.chat_serve_var.get()) if hasattr(self, "chat_serve_var") else False,
             "chat_port": self.chat_port_var.get().strip() if hasattr(self, "chat_port_var") else "",
@@ -1781,6 +1941,8 @@ class App(tk.Tk):
             self.digi_alias_var.set(str(st.get("digi_alias", "") or ""))
         if hasattr(self, "gw_direct_var"):
             self.gw_direct_var.set(bool(st.get("gateway_direct", True)))
+            if hasattr(self, "update_check_var"):
+                self.update_check_var.set(bool(st.get("update_check", True)))
         if hasattr(self, "gateway_var"):
             self.gateway_var.set(bool(st.get("gateway", False)))
         if hasattr(self, "chat_serve_var"):
@@ -1838,7 +2000,7 @@ class App(tk.Tk):
                           f"{self.ra_board_var.get() or 'RA-Board-' + str(sel + 1)} and audio goes to "
                           f"'{self._dev_name(self.out_dev_var.get())}'. They must be the SAME interface: "
                           f"Settings > Devices > Test PTT (2s) and check that the right radio keys, and "
-                          f"TUNE 10s to check its audio reaches the other station.")
+                          f"Test tone (10 s) there to check its audio reaches the other station.")
             # "GPIO4 (0x08)" -> 0x08
             pin_label = self.gpio_pin_var.get()
             ptt_kwargs["gpio_pin"] = int(pin_label.split("(")[1].rstrip(")"), 16)
@@ -1894,6 +2056,7 @@ class App(tk.Tk):
         self._update_mode_controls()
         if not self.bridge:
             self._toggle_bridge()        # v0.9.36: the KISS bridge is always on while running
+        self._run_sig = self._engine_sig()       # v0.9.89: what this start used
         self._log(f"Started. {ofdm.NUM_CARRIERS} subcarriers, "
                    f"{ofdm.GROSS_BPS if hasattr(ofdm, 'GROSS_BPS') else ''}"
                    f" version {ofdm.VERSION}")
@@ -1924,9 +2087,9 @@ class App(tk.Tk):
         self.tune_btn.configure(state="normal" if connected else "disabled")
         self.txtune_btn.configure(state="normal" if connected and not getattr(self, "txtune", None)
                                   else "disabled")
-        net_state = "disabled" if self.bridge is not None else "normal"
-        self.remote_kiss_chk.configure(state=net_state)
-        self.kiss_allow_entry.configure(state=net_state)
+        self.remote_kiss_chk.configure(state="normal")      # v0.9.89: changes restart it
+        self.kiss_allow_entry.configure(state="normal")
+
 
     # ── BPQ32/KISS bridge ──────────────────────────────────────────────
     def _toggle_bridge(self):
@@ -2107,7 +2270,8 @@ class App(tk.Tk):
             # Tk variables (callsign) are read here, on the GUI thread -- this
             # method itself runs on the transmit worker thread.
             self.tx_meter.add(ax25_bytes)
-            src = "DIGI" if n_relay == len(ax_frames) and n_relay else "BPQ32"
+            src = "DIGI" if n_relay == len(ax_frames) and n_relay else \
+                ("TERM" if self._term_frames(ax_frames) else "BPQ32")
             self._log(f"TX ({src}->air)  {len(payload)} bytes{frames_note}  [{mod_name}]{relay_note}"
                       f"  {{{link_adapt.batch_trace(ax_frames)}}}")
             log_csv_row(my_call=self.call_var.get().strip().upper(), event="BPQ_TX",
@@ -2330,7 +2494,12 @@ class App(tk.Tk):
             except tk.TclError:
                 w = None
         if w is None and open_it:
-            w = ping_window.PingWindow(self, on_ping=self._send_ping, on_autotune=self._start_autotune)
+            w = ping_window.PingWindow(self, on_ping=self._send_ping, on_autotune=self._start_autotune,
+                                       target_var=self.target_var,
+                                       on_target=self._ping_target_changed,
+                                       rx_var=self.rx_gain_db_var, tx_var=self.tx_level_var,
+                                       loc_var=self.target_loc_var, prof_var=self.target_prof_var,
+                                       on_save=self._save_target, on_remove=self._remove_target)
             try:  # open beside the main window, kept on screen
                 self.update_idletasks()
                 x = min(self.winfo_rootx() + self.winfo_width() + 10,
@@ -2340,11 +2509,110 @@ class App(tk.Tk):
                 pass
         self.ping_win = w
         if w is not None:
+            try:
+                w.set_targets(list(self.target_combo["values"]))
+            except Exception:
+                pass
             w.set_peers(self.call_var.get().strip().upper(),
                         self.target_var.get().strip().upper() or proto.BROADCAST)
             if open_it:
                 w.lift()
         return w
+
+    # ── v0.9.96: new-version notice, like VARA FM ────────────────────
+    def _check_update(self, manual: bool = False):
+        """Ask GitHub (in the background) for the latest release. Automatic
+        checks are quiet when nothing is found or there is no internet."""
+        if not manual and not self.update_check_var.get():
+            return
+        def work():
+            res = update_check.latest(timeout=8)
+            self.after(0, lambda: self._update_result(res, manual))
+        threading.Thread(target=work, daemon=True, name="update-check").start()
+        if manual:
+            self._log("Checking for a new SARA FM version ...")
+
+    def _update_result(self, res, manual: bool):
+        if res is None:
+            if manual:
+                self._log("Could not check for a new version (no internet, or the download page "
+                          "can't be reached from here).")
+                messagebox.showinfo("SARA FM", "Could not check for a new version right now.\n\n"
+                                    f"Downloads: {update_check.RELEASES_PAGE}")
+            return
+        ver, url = res
+        self._update_url = url or update_check.RELEASES_PAGE
+        if update_check.is_newer(ver, ofdm.VERSION):
+            v = update_check.short(ver)
+            self.update_var.set(f"New SARA FM {v} available -- click to download")
+            if not self.update_lbl.winfo_manager():
+                self.update_lbl.pack(side="right", padx=8)
+            self._log(f"A new SARA FM version is available: {v} (this is {update_check.short(ofdm.VERSION)}). "
+                      f"Download: {self._update_url}")
+            if manual:
+                if messagebox.askyesno("SARA FM", f"SARA FM {v} is available (this is "
+                                       f"{update_check.short(ofdm.VERSION)}).\n\nOpen the download page?"):
+                    self._open_update_page()
+        elif manual:
+            self._log(f"SARA FM is up to date ({update_check.short(ofdm.VERSION)}).")
+            messagebox.showinfo("SARA FM", f"SARA FM {update_check.short(ofdm.VERSION)} is the latest version.")
+
+    def _open_update_page(self):
+        import webbrowser
+        try:
+            webbrowser.open(getattr(self, "_update_url", None) or update_check.RELEASES_PAGE)
+        except Exception as e:
+            self._log(f"Could not open the browser: {e}")
+
+    # ── v0.9.93: menus laid out like VARA FM ─────────────────────────
+    def _open_ping_window(self):
+        """Ping on the menu bar: the Ping window, where the station is picked,
+        Ping and Auto-Tune are pressed and the levels can be slid by hand.
+        v0.9.94: opening it is choosing that station -- its saved levels are
+        on the sliders straight away (on a gateway too)."""
+        if self._ping_window(open_it=True) is not None and self.target_var.get().strip():
+            self._ping_target_changed()
+
+    def _ping_target_changed(self):
+        """A station picked in the Ping window: its saved levels come back (the
+        sliders show them) and the window starts fresh.
+        v0.9.94: also on a gateway. Field (DW1IRF, 0.9.93): with "This
+        station is a gateway" ticked, picking a station kept the gateway's
+        levels, so the sliders didn't match that station's saved levels.
+        Pinging and tuning from the Ping window is this station calling out,
+        like a gateway calling a station (v0.9.87); the gateway's own levels
+        come back for the next caller."""
+        self._on_target_selected()
+        if self._is_gateway():
+            call = self.target_var.get().strip()
+            t = self._find_target(call)
+            if t and t[2]:
+                if getattr(self, "_gw_levels", None) is None:
+                    self._gw_levels = self._current_profile()
+                    self._log("Gateway: using the saved levels of the station you ping; the gateway's "
+                              "own levels come back for the next caller.")
+                self._apply_profile(call, t[2], why="picked in the Ping window")
+        try:
+            self._show_target_location()
+        except Exception:
+            pass
+        w = self.ping_win
+        if w is not None:
+            w.reset_result()
+            w.set_peers(self.call_var.get().strip().upper(),
+                        self.target_var.get().strip().upper() or proto.BROADCAST)
+
+    def _show_tune_view(self):
+        """Settings > Tune: the full window, with Target, Location, Save,
+        Modulation and PING."""
+        self.view_var.set("full")
+        self._apply_view("full")
+        try:
+            self.deiconify()
+            self.lift()
+            self.target_combo.focus_set()
+        except Exception:
+            pass
 
     def _send_ping(self, modulation: int | None = None, want_carrier: bool = False):
         if not self.engine or not self._ping_allowed():
@@ -2854,6 +3122,19 @@ class App(tk.Tk):
         frames = bpq_bridge.unpack_batch(payload)
         if frames == [payload]:
             return payload
+        # v0.9.91: the SARA Terminal's own frames are never "a session that's
+        # over" or "a pointless resend" -- those rules are about the KISS
+        # client. Field (0.9.90, DW1IRF-7 -> DV1UK-12 Chat Server): with no
+        # KISS client connected, every acknowledgment and every typed line
+        # was dropped here; only the connect (SABM) and DISC got out.
+        term = [f for f in frames if App._is_term_frame(self, f)]
+        if term:
+            rest = [f for f in frames if f not in term]
+            if not rest:
+                return payload
+            filtered = App._tx_filter(self, bpq_bridge.pack_batch(rest))
+            kept = bpq_bridge.unpack_batch(filtered) if filtered else []
+            return bpq_bridge.pack_batch(kept + term)
         br_ = self.bridge
         if br_ is not None and getattr(br_, "_client_sock", True) is None:
             # v0.9.70: the KISS client (Winlink Express / BPQ32) has gone --
@@ -3021,6 +3302,12 @@ class App(tk.Tk):
                           f"TX level (and Windows playback level) and run Auto-Tune.")
 
     # ── TUNE (v0.7.0) ───────────────────────────────────────────────
+    def _test_tone(self):
+        if self.engine is None:
+            self._log("Test tone: SARA FM isn't running yet -- check the sound card and PTT here.")
+            return
+        self._start_tune()
+
     def _start_tune(self):
         if not self.engine:
             return
@@ -3202,7 +3489,7 @@ class App(tk.Tk):
             lines.append(f"  No reply from {at['target']} (tried TX level {tried}, BPSK). Check: same "
                          f"frequency, {at['target']} has SARA FM started and idle, and your radio keys "
                          f"(TX lamp, radio's TX light). Ask them to watch their RX meter while you press "
-                         f"TUNE 10s: no movement = they don't hear you at all.")
+                         f"Settings > Devices > Test tone (10 s): no movement = they don't hear you at all.")
             if at.get("raised") and self.engine is not None:
                 self._set_tx_level_pct(int(round(at["start_tx"] * 100)))
                 lines.append(f"  (TX level put back to {int(round(at['start_tx'] * 100))}%.)")
@@ -3921,6 +4208,10 @@ class App(tk.Tk):
             if out != to_client:
                 held = True
             to_client = out
+        n_before = len(to_client)
+        to_client = self._term_take(to_client)              # v0.9.90: SARA Terminal
+        if len(to_client) != n_before:
+            held = True
         if self.bridge and to_client:
             self._deliver_to_client(to_client, None if held else frame.payload)
 
@@ -4032,6 +4323,65 @@ class App(tk.Tk):
         d = os.path.join(self._chat_dir(), "chat_files")
         os.makedirs(d, exist_ok=True)
         return d
+
+    # ── SARA Terminal (v0.9.90) ──────────────────────────────────────
+    def open_terminal(self):
+        w = getattr(self, "_term_win", None)
+        if w is None:
+            w = self._term_win = term_window.TerminalWindow(self, app_dir())
+        w.deiconify()
+        w.lift()
+
+    def _term_send(self, frames):
+        """Frames from the terminal's own AX.25 connection: out through the
+        same burst transmitter, Auto speed and link reports as BPQ32's."""
+        if self.engine is None:
+            self._log("Terminal: SARA FM isn't running -- frame not sent.")
+            return
+        payload = bpq_bridge.pack_batch(frames)
+        for f in frames:
+            try:
+                self._on_client_frame(f)          # new connection, Auto speed, resends
+            except Exception:
+                pass
+        try:
+            self.stale.on_queued(frames)
+        except Exception:
+            pass
+        self.engine.queue_transmit(payload, modulation=self._bridge_modulation(payload),
+                                   on_sent=self._bridge_on_sent,
+                                   on_error=lambda e: self._report_error("Terminal TX error", e))
+
+    def _term_take(self, frames: list) -> list:
+        """Received frames for the terminal's callsign go to the terminal (and
+        never to BPQ32 / Winlink Express); the rest are returned."""
+        term = getattr(self, "term", None)
+        if term is None or not frames:
+            return frames
+        mine = [f for f in frames if term.wants(f)]
+        for f in mine:
+            try:
+                term.receive(f)
+            except Exception as e:
+                self._log(f"Terminal error: {e}")
+        return [f for f in frames if f not in mine]
+
+    def _is_term_frame(self, f: bytes) -> bool:
+        term = getattr(self, "term", None)
+        if term is None:
+            return False
+        p = ax25_term.parse(f)
+        return bool(p) and p["src"] == term.my_call
+
+    def _term_frames(self, frames) -> bool:
+        term = getattr(self, "term", None)
+        if term is None or not frames:
+            return False
+        for f in frames:
+            p = ax25_term.parse(f)
+            if not p or p["src"] != term.my_call:
+                return False
+        return True
 
     def open_chat(self):
         if self.chat_win is None or not self.chat_win.winfo_exists():
@@ -4335,6 +4685,13 @@ class App(tk.Tk):
             self.chat_btn.configure(text=f"Chat ({n} new)" if n else "Chat")
         except (tk.TclError, AttributeError):
             pass
+        # v0.9.96: the menu bar's Chat shows unread messages (the button is gone)
+        mb, i = getattr(self, "_menubar", None), getattr(self, "_chat_menu_index", None)
+        if mb is not None and i is not None:
+            try:
+                mb.entryconfigure(i, label=f"Chat ({n} new)" if n else "Chat")
+            except tk.TclError:
+                pass
 
     # ── SARA FM digipeater (v0.9.37) ─────────────────────────────────
     DIGI_DUPE_S = 3.0     # the same frame decoded twice in one burst; NOT longer:
@@ -4681,9 +5038,79 @@ def _arg_value(name: str, default=None):
     return None
 
 
+# v0.9.89: one copy per folder. Winlink Express can launch SARA FM itself
+# ("Packet sound modem" + "Automatically launch") every time a Packet session
+# opens; a second copy would fight the first for the sound card and KISS port.
+# The first copy holds a small localhost port (worked out from its folder, so
+# a gateway folder and a client folder on one PC each get their own); a second
+# copy from the same folder asks it to come to the front, and closes.
+def _instance_port(folder: str | None = None) -> int:
+    import zlib
+    key = os.path.normcase(os.path.abspath(folder or app_dir())).encode("utf-8", "replace")
+    return 49152 + zlib.crc32(key) % 10000
+
+
+def single_instance(on_show, folder: str | None = None):
+    """Returns the held socket for the first copy (keep it open), or None when
+    a copy from this folder is already running (it has been asked to show)."""
+    import socket
+    port = _instance_port(folder)
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if sys.platform == "win32" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    try:
+        srv.bind(("127.0.0.1", port))
+        srv.listen(2)
+    except OSError:
+        srv.close()
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=2) as c:
+                c.sendall(b"show\n")
+        except OSError:
+            pass
+        return None
+
+    def serve():
+        while True:
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            try:
+                conn.settimeout(2)
+                if conn.recv(16).startswith(b"show"):
+                    on_show()
+            except OSError:
+                pass
+            finally:
+                conn.close()
+    threading.Thread(target=serve, daemon=True, name="single-instance").start()
+    return srv
+
+
 def main():
     if "--selftest" in sys.argv:
         sys.exit(0 if selftest() else 1)
+    _app_ref = []
+
+    def _show_existing():
+        if _app_ref:
+            a = _app_ref[0]
+            def up():
+                try:
+                    if "--headless" not in sys.argv:
+                        a.deiconify()
+                    a.lift()
+                    a.focus_force()
+                    a._log("SARA FM was opened again (e.g. by Winlink Express) -- this copy "
+                           "is already running.")
+                except Exception:
+                    pass
+            a.after(0, up)
+    _lock = single_instance(_show_existing)
+    if _lock is None:
+        print("SARA FM is already running from this folder -- brought it to the front.")
+        sys.exit(0)
     # v0.9.81: Raspberry Pi / headless. --headless runs with no screen (on a
     # virtual display) and implies --web; --web[=PORT] serves the phone page
     # (port 8090 by default since 0.9.82); --autostart presses Start once the
@@ -4703,6 +5130,7 @@ def main():
         web_port = str(web_ui.DEFAULT_PORT)
     try:
         app = App()
+        _app_ref.append(app)
         if web_port is not None:
             try:
                 mail_port = _arg_value("--mail-port", "3000")      # v0.9.82: PAREDN Webmail
@@ -4715,8 +5143,12 @@ def main():
                 app._log(f"Web page could not start on port {web_port}: {e}")
         if headless:
             app.withdraw()
-        if "--autostart" in sys.argv:
-            app.after(2500, lambda: app.engine is None and app._toggle_connect())
+        # v0.9.89: starts by itself, like VARA FM (--autostart is no longer
+        # needed; --no-autostart leaves it stopped, for testing)
+        if "--no-autostart" not in sys.argv:
+            app._autorun = True
+            app.after(500, app._auto_start)
+            app.after(20000, app._check_update)        # v0.9.96: quietly, once per start      # quick: Winlink Express connects right after launching it
         app.mainloop()
     except Exception:
         # If it fails to start on a remote gateway, leave the error where a

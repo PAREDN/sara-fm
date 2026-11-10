@@ -24,8 +24,10 @@ SARA-PP -- Gateway Quick Start (standalone Windows version, no Python needed)
    Settings > SARA Setup
    - My callsign, and Gauge title (v0.9.36: a line shown above the gauges
      in View > Gauges only, e.g. "DX1FLR-10  Winlink Gateway")
-   - KISS TCP port 8105. The BPQ32/KISS bridge starts by itself when you
-     press Start (v0.9.36: there is no separate Start Bridge button)
+   - KISS TCP port 8105. The BPQ32/KISS bridge starts by itself.
+     v0.9.89: there is no Start button -- SARA FM starts as soon as it
+     opens, like VARA FM, and restarts by itself when you close a settings
+     window after changing the sound card, PTT or KISS port (see 18)
    - DCD mode: SARA-PP signals only (the default)
    Settings > Devices
    - Input/Output device: the USB audio interface
@@ -150,7 +152,7 @@ SARA-PP -- Gateway Quick Start (standalone Windows version, no Python needed)
      192.168.x). Add specific IPs or ranges if needed, e.g.
      "private 44.0.0.0/8". Public internet addresses are refused unless
      listed.
-   - Press Start (Stop and Start again after changing these). The log shows this PC's IP addresses to connect to.
+   - Close the window: SARA FM restarts with these settings. The log shows this PC's IP addresses to connect to.
    - If Windows Firewall asks, allow it on PRIVATE networks only.
    On the tester's PC (Winlink Express > Packet Winlink/P2P Setup):
    - KISS, Serial Port TCP, TCP Host = the station's IP (e.g. its
@@ -281,7 +283,7 @@ SARA-PP -- Gateway Quick Start (standalone Windows version, no Python needed)
      performance power plan. If it keeps happening (old or low-power
      gateway PC), in this order:
        1. Settings > SARA Setup > Link: tick "Slow PC mode" (larger audio
-          buffer, lighter window), then Stop and Start.
+          buffer, lighter window), then close the window (SARA FM restarts).
        2. Run SARA FM with its window hidden: make a shortcut to
           SARA-FM.exe ending in  --headless --autostart  and start it from that.
           There is no window; open http://<this PC>:8090/ on a phone or
@@ -357,7 +359,7 @@ SARA-PP -- Gateway Quick Start (standalone Windows version, no Python needed)
    - At the station (has the radio): Setup > SARA Chat over the network >
      tick "Let operators on other computers chat through this station's
      radio" (port 8180). Uses the KISS "Allow from" list (private =
-     Tailscale, AREDN, LAN). Press Stop, then Start. The log says "Remote
+     Tailscale, AREDN, LAN). Close the window (SARA FM restarts). The log says "Remote
      chat ON (port 8180)"; Windows Firewall: allow Private networks.
    - At the operator's PC: install SARA FM, set YOUR callsign, then Setup >
      SARA Chat over the network > tick "Chat through a remote SARA FM
@@ -426,3 +428,75 @@ IF SOMETHING GOES WRONG
      sara_pingpong_log.csv
      sara_pp_settings.json
    plus a screenshot or copy of the program's log window.
+
+
+18. STARTS BY ITSELF, LIKE VARA FM (v0.9.89+)
+   - Open SARA FM and it starts: sound card, PTT and the KISS port for
+     BPQ32 / Winlink Express. There is no Start button.
+   - First time on a PC: it opens Settings > SARA Setup (callsign) and
+     Settings > Devices (sound card, PTT); it starts when you close them.
+   - Changing the sound card, PTT, KISS port, network access or Slow PC
+     mode: close the settings window and SARA FM restarts by itself. During
+     a Winlink transfer it waits until the transfer is idle.
+   - Settings > Devices > Restart SARA FM does it by hand (e.g. after replugging the
+     RA-Board).
+   - Settings > SARA Setup > "Start SARA FM with Windows": puts a shortcut in the Windows
+     Startup folder. After a power cut or reboot the gateway PC opens SARA
+     FM, which starts by itself and waits on its KISS port. Put BPQ32 in the
+     Startup folder too (or use its own autostart); BPQ32 keeps retrying the
+     KISS TCP port, so the order they open in doesn't matter.
+   - Winlink Express on a client PC can open SARA FM for you:
+     Packet Winlink/P2P Setup > "Packet sound modem" = the full path to
+     SARA-FM.exe (the win64 build, not a .py file), and tick
+     "Automatically launch packet sound modem". KISS, TCP, 127.0.0.1 and
+     the same port as SARA FM's KISS port. If SARA FM is already open, the
+     new copy just brings it to the front and closes -- one copy per folder.
+     A gateway SARA FM and a client SARA FM can still run side by side on
+     one PC from two different folders (different KISS ports and sound
+     cards).
+   - For testing: SARA-FM.exe --no-autostart opens it without starting.
+
+
+19. SARA TERMINAL -- BPQ32 NODES AND CHAT SERVERS (v0.9.90+)
+   A plain terminal, like VARA Terminal or EasyTerm, that connects over
+   SARA FM to a BPQ32 node, e.g. the Chat Server on DX1PRD-12.
+   - Terminal (on the menu bar).
+   - My call: your callsign WITH an SSID, e.g. DW1IRF-7 (the default).
+     Not the plain station call -- BPQ32 / Winlink Express may use that.
+   - Connect to: DX1PRD-12 (or "DX1PRD-12 via DW1IRF" through a
+     digipeater). Press Connect, wait for the node's greeting, type CHAT.
+     Leave the Chat Server with its own command (/B), then Disconnect.
+   - The node must have a SARA FM port in its BPQ32 (and SARA FM running
+     on its radio). A node listening only on 1200 baud won't hear it.
+   - Ping and Tune to the node first, as for a gateway.
+   - It runs alongside BPQ32 / Winlink Express on the same SARA FM:
+     replies to the terminal's callsign go only to the terminal.
+
+
+20. THE MENUS, LAID OUT LIKE VARA FM (v0.9.93+)
+   Settings  View  Ping  Log  Chat  Terminal  Help
+   - Settings > SARA Setup: callsign, KISS port, gateway, Slow PC mode,
+     "Start SARA FM with Windows".
+   - Settings > Devices: sound card, PTT, Test PTT (2s), Test tone (10 s)
+     (was TUNE 10s), Restart SARA FM.
+   - View > Full adds Modulation and the log; View > Gauges only shows just
+     the meters. Ping and Chat are on the menu bar (Chat shows "(1 new)"
+     when a message is waiting).
+   - Ping: opens the Ping window. Pick the station there ("Ping to:"), press
+     Ping or Auto-Tune, and move the two sliders (Transmit audio = TX level,
+     Receive audio = RX gain) by hand if you want different levels. Ping
+     the next station without closing the window. Picking a station brings
+     back its saved levels and the sliders show them -- on a gateway too
+     (the gateway's own levels come back for the next caller).
+   - The station list lives in the Ping window (v0.9.95): type a new
+     callsign in "Ping to:", fill in Location and press Save -- it keeps the
+     station, its location and the levels now on the sliders. Remove takes
+     the station off the list. Works from the Gauges-only view too.
+   - Chat: opens SARA Chat (CQ, Check in, Files and a Light / Dark button
+     are in the window; it starts dark, white text on black).
+   - Terminal: opens SARA Terminal.
+   - New version notice (v0.9.96+): like VARA FM, SARA FM checks once when
+     it starts and, if a newer version is out, says so in the status bar
+     ("New SARA FM x.y.z available -- click to download"). Help > Check for
+     a new version checks by hand. Turn it off in Settings > SARA Setup.
+     It needs internet and only works once the GitHub page is public.

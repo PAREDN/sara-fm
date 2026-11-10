@@ -29,25 +29,72 @@ class PingWindow(tk.Toplevel):
     W, H = 760, 300                   # v0.9.52: third row = data carriers
     BOX_W, BOX_H = 196, 36
 
-    def __init__(self, master, on_ping=None, on_autotune=None):
+    def __init__(self, master, on_ping=None, on_autotune=None, target_var=None, on_target=None,
+                 rx_var=None, tx_var=None, loc_var=None, prof_var=None, on_save=None, on_remove=None):
         super().__init__(master)
-        self.title("SARA-PP Ping")
+        self.title("SARA FM Ping")
         self.resizable(False, False)
         self._on_ping = on_ping
         self._on_autotune = on_autotune
+        self._on_target = on_target
 
         top = ttk.Frame(self, padding=(10, 8, 10, 0))
         top.pack(fill="x")
         self.peer_var = tk.StringVar(value="Ping to: -")
-        ttk.Label(top, textvariable=self.peer_var, font=("TkDefaultFont", 11, "bold")).pack(side="left")
+        self.target_combo = None
+        if target_var is not None:
+            # v0.9.93: pick the station right here, like VARA FM -- no need to
+            # close the window to ping the next one
+            ttk.Label(top, text="Ping to:", font=("TkDefaultFont", 11, "bold")).pack(side="left")
+            self.target_combo = ttk.Combobox(top, textvariable=target_var, width=24)
+            self.target_combo.pack(side="left", padx=6)
+            self.target_combo.bind("<<ComboboxSelected>>", lambda e: self._target())
+            self.target_combo.bind("<Return>", lambda e: self._target())
+        else:
+            ttk.Label(top, textvariable=self.peer_var, font=("TkDefaultFont", 11, "bold")).pack(side="left")
         ttk.Button(top, text="Close", command=self.destroy).pack(side="right")
         self.autotune_btn = ttk.Button(top, text="Auto-Tune", command=self._autotune)
         self.autotune_btn.pack(side="right", padx=6)
         self.ping_btn = ttk.Button(top, text="Ping", command=self._ping)
         self.ping_btn.pack(side="right")
 
+        # v0.9.95: the station list is kept here -- Location, Save (callsign,
+        # location and the levels now on the sliders), Remove
+        self.save_btn = self.remove_btn = None
+        if loc_var is not None and on_save is not None:
+            row = ttk.Frame(self, padding=(10, 6, 10, 0))
+            row.pack(fill="x")
+            ttk.Label(row, text="Location:").pack(side="left")
+            ttk.Entry(row, textvariable=loc_var, width=28).pack(side="left", padx=6)
+            self.save_btn = ttk.Button(row, text="Save", width=7, command=on_save)
+            self.save_btn.pack(side="left")
+            if on_remove is not None:
+                self.remove_btn = ttk.Button(row, text="Remove", width=8, command=on_remove)
+                self.remove_btn.pack(side="left", padx=(4, 0))
+            if prof_var is not None:
+                ttk.Label(row, textvariable=prof_var, foreground="#555").pack(side="left", padx=(12, 0))
+
         self.canvas = tk.Canvas(self, width=self.W, height=self.H, bg="white", highlightthickness=0)
         self.canvas.pack(padx=10, pady=8)
+
+        # v0.9.93: set the levels by hand, while watching the boxes above;
+        # Auto-Tune moves these sliders too. Save keeps them for the station.
+        self.tx_scale = self.rx_scale = None
+        if rx_var is not None and tx_var is not None:
+            lv = ttk.Frame(self, padding=(10, 0, 10, 0))
+            lv.pack(fill="x")
+            ttk.Label(lv, text="Transmit audio (TX level %)").grid(row=0, column=0, sticky="w")
+            self.tx_scale = tk.Scale(lv, from_=5, to=100, resolution=1, orient="horizontal",
+                                     length=300, variable=tx_var, showvalue=True)
+            self.tx_scale.grid(row=1, column=0, sticky="w", padx=(0, 30))
+            ttk.Label(lv, text="Receive audio (RX gain dB)").grid(row=0, column=1, sticky="w")
+            self.rx_scale = tk.Scale(lv, from_=-20, to=40, resolution=1, orient="horizontal",
+                                     length=300, variable=rx_var, showvalue=True)
+            self.rx_scale.grid(row=1, column=1, sticky="w")
+            ttk.Label(lv, text="Ping again after a change to see the effect. Press Save (above) to keep "
+                               "these levels for this station.",
+                      foreground="#666", wraplength=740, justify="left").grid(row=2, column=0, columnspan=2,
+                                                                                sticky="w", pady=(2, 0))
 
         self.status_var = tk.StringVar(value="")
         ttk.Label(self, textvariable=self.status_var, font=("TkDefaultFont", 10, "bold")).pack(anchor="w", padx=12)
@@ -69,7 +116,25 @@ class PingWindow(tk.Toplevel):
         if self._on_autotune:
             self._on_autotune()
 
+    def _target(self):
+        if self._on_target:
+            self._on_target()
+
     # ── public API ───────────────────────────────────────────────────
+    def set_targets(self, values):
+        if self.target_combo is not None:
+            self.target_combo.configure(values=list(values))
+
+    def reset_result(self):
+        """A different station picked: clear the last one's numbers."""
+        for a in ("_you", "_they"):
+            if hasattr(self, a):
+                setattr(self, a, None)
+        self._car = (None, None)
+        self.status_var.set("")
+        self.set_advice([])
+        self._draw()
+
     def set_peers(self, local: str, remote: str):
         self._local, self._remote = local or "-", remote or "-"
         self.peer_var.set(f"Ping to: {self._remote}")
@@ -84,7 +149,7 @@ class PingWindow(tk.Toplevel):
         self._draw(link="failed")
         self.set_advice([f"Check: same frequency, {self._remote} running SARA-PP (Ping/Pong mode, "
                          f"or bridged and idle), and levels -- ask them to watch their RX meter "
-                         f"while you press TUNE."])
+                         f"while you send a Test tone (Settings > Devices)."])
 
     def set_result(self, you_hear: tuple, they_hear: tuple | None, rtt_s: float | None = None,
                    carriers: tuple | None = None):

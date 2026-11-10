@@ -227,7 +227,7 @@ TAPER_LEN  = int(SAMPLE_RATE * TAPER_MS / 1000)   # ~72 samples, ~11% of one sym
 
 PREAMBLE_REPS = 4
 
-VERSION = "sara-fm-0.9.88"
+VERSION = "sara-fm-0.9.96"
 
 # Fixed, deterministic preamble bit pattern (known to both ends).
 _rng = np.random.RandomState(1337)

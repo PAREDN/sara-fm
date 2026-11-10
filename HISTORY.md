@@ -166,6 +166,151 @@ by `test_offline.py`, including a full software-only round trip
 (KISS frame → OFDM air link → KISS frame again) with no BPQ32, radio,
 or network required to verify the whole chain.
 
+## v0.9.96 — cleaner main window; new-version notice
+
+- The main window has no button row any more: Ping and Chat are on the
+  menu bar. Chat on the menu bar shows "(1 new)" for unread messages.
+- The big "Tune: not run yet" banner is gone; Auto-Tune's result shows in
+  the Ping window and the log, and in the status bar while it runs.
+- New version notice, like VARA FM: once per start (20 s in) SARA FM asks
+  GitHub for the latest release of PAREDN/sara-fm. If it is newer, the
+  status bar says "New SARA FM x.y.z available -- click to download".
+  Help > Check for a new version checks by hand; Settings > SARA Setup can
+  turn the automatic check off. Only the version number goes out (in the
+  User-Agent). It works once the repository is public; with no internet it
+  stays quiet. New `update_check.py`.
+
+## v0.9.95 — the station list moves into the Ping window
+
+Field (DW1IRF): from View > Gauges only, Ping opened the Ping window but
+there was no way to save the adjusted levels -- Save was on the main
+window's Target row, which that view hides.
+
+- The Ping window has Location, Save and Remove, plus the station's saved
+  levels. Save keeps the station, its location and the levels on the
+  sliders; Remove takes it off the list.
+- The main window no longer has the Target, Location, Save and Remove row;
+  Modulation stays there.
+
+## v0.9.94 — Ping window sliders follow the station picked
+
+Field (DW1IRF, 0.9.93): picking a station in the Ping window didn't move the
+sliders to that station's saved levels. With "This station is a gateway"
+ticked, picking a station keeps the gateway's levels (0.9.78), and that rule
+applied in the Ping window too.
+
+- Picking a station in the Ping window always brings back its saved levels,
+  and the sliders show them, also on a gateway: pinging and tuning from the
+  Ping window is this station calling out (as in 0.9.87). The gateway's own
+  levels come back for the next caller.
+- Settings menu: SARA Setup and Devices only (Tune removed; View > Full shows
+  the Target row).
+- View menu: "Gauges only" (no "to sit next to VARA FM").
+
+## v0.9.93 — menus laid out like VARA FM
+
+Asked for by the sysop, so volunteers who know VARA FM find their way:
+
+- Menu bar: Settings, View, Ping, Log, Chat, Terminal, Help. Chat and
+  Terminal open their windows directly.
+- Settings: SARA Setup, Devices, Tune. Tune shows the full window (Target,
+  Location, Save, Modulation, PING). "Tune TX level only" is gone (Auto-Tune
+  does both). "Start SARA FM with Windows" moved into SARA Setup;
+  "Restart SARA FM" and the 10-second test tone (was TUNE 10s) moved into
+  Devices, beside Test PTT.
+- Main window: only PING (and Chat) on the button row; Tune and TUNE 10s
+  are gone from it.
+- Ping window: "Ping to:" station picker, so several stations can be pinged
+  without closing it (as in VARA FM); picking one brings back its saved
+  levels. Two sliders, Transmit audio (TX level %) and Receive audio (RX
+  gain dB), to set levels by hand; Save in the main window keeps them.
+- SARA Chat: dark (white text on black) by default, with a Light / Dark
+  button that is remembered; a Files button opens the received-files folder.
+- Messages that said "press TUNE 10s" or "press Tune" now name the new
+  places.
+
+## v0.9.92 — the Windows build's tests no longer depend on the PC
+
+Field: `build_exe.bat` for 0.9.91 stopped with 2 failed tests on DW1IRF's
+PC (all passed on the test machines). The tests were reading the real
+sara_pp_settings.json in the build folder. That file had "This station is
+a gateway" ticked, and a gateway keeps one set of levels on purpose, so
+"picking a station puts back its saved levels" failed. Since 0.9.89,
+closing a settings window can also start the modem, so on a PC with a real
+callsign, sound card and RA-Board a test could start the real modem.
+
+- The offline tests use their own temporary settings folder and never read
+  or write the real settings file.
+- Closing a settings window starts or restarts SARA FM only when it was
+  opened to run (main()), not when a test opens the window.
+
+## v0.9.91 — SARA Terminal: acknowledgments and typed lines go out
+
+Field (0.9.90, DW1IRF-7 -> DV1UK-12 BPQ Chat Server): the terminal
+connected and the server asked for a name, but nothing typed ever arrived.
+DV1UK's log shows it polling DW1IRF-7 every 16 s and hearing nothing back
+except the connect and the disconnect. The transmitter was dropping every
+terminal I frame and acknowledgment: with no KISS client connected (Winlink
+Express had disconnected), SARA FM treats queued data frames as left over
+from a session that's over (the 0.9.70 rule), and the terminal's frames were
+caught by it. Only U frames (SABM, DISC) passed.
+
+- The terminal's own frames are exempt from the "KISS client gone" and
+  "pointless resend" rules, which are about the KISS client's frames. The
+  KISS client's leftovers are still dropped as before.
+
+## v0.9.90 — SARA Terminal (connect to a BPQ32 node / Chat Server)
+
+Asked for by the sysop: a plain terminal like VARA Terminal, to reach the
+BPQ32 Chat Server on DX1PRD-12 (Mt Mataba) over SARA FM, the way EasyTerm
+reaches it over 1200-baud packet with the UZ7HO soundmodem.
+
+- Chat > SARA Terminal: My call (default this station with -7, e.g.
+  DW1IRF-7), Connect to (e.g. DX1PRD-12, or "DX1PRD-12 via DW1IRF"),
+  Connect / Disconnect, a text window and a typing line. Type CHAT once
+  connected.
+- New `ax25_term.py`: a small AX.25 v2.0 link layer (modulo 8): connect /
+  disconnect, numbered frames with acknowledgments, resends after a lost
+  frame (REJ) or a quiet timer (poll), a check on a quiet link every
+  5 minutes, and giving up after 6 tries. Timers suit SARA FM air times
+  (12 s, like FRACK=12000 on the gateways).
+- This is the only place SARA FM makes AX.25 frames itself, and only for
+  the terminal's own connection under the terminal's own callsign. Frames
+  of BPQ32 / Winlink Express sessions are still never created, changed or
+  answered by SARA FM. Received frames for the terminal's callsign go to
+  the terminal and never to the KISS client; incoming connections to the
+  terminal are refused (DM).
+- On the air: SARA FM modes, Auto speed, link reports and the "don't
+  answer in a window's gaps" rule, exactly as for BPQ32's frames. The log
+  shows them as TX (TERM->air).
+- The node needs a SARA FM port in its BPQ32 to hear the terminal.
+
+## v0.9.89 — starts by itself, like VARA FM
+
+Asked for by the sysop: no more pressing Start, and Ping within reach in the
+Gauges-only view.
+
+- No Start button. SARA FM starts the sound card, PTT and KISS port as soon
+  as it opens. On a PC that isn't set up yet, it opens SARA Setup or Devices
+  instead of showing an error, and starts when that window is closed.
+- Closing a settings window after changing the sound card, PTT, KISS port,
+  network access or Slow PC mode restarts SARA FM by itself (also from the
+  phone page). During a Winlink transfer it waits until the transfer is idle.
+  Settings > Restart SARA FM does it by hand.
+- Ping and Tune are first on the menu bar, so they work in View > Gauges
+  only.
+- Settings > Start SARA FM with Windows (Windows only) adds or removes a
+  shortcut in the Windows Startup folder.
+- One copy per folder: Winlink Express can launch SARA FM itself ("Packet
+  sound modem" path + "Automatically launch packet sound modem"). A second
+  copy from the same folder brings the running one to the front and closes,
+  instead of fighting it for the sound card and KISS port. Copies in
+  different folders (a gateway and a client on one PC) still run side by
+  side. It starts half a second after opening, so it is ready when Winlink
+  Express connects.
+- `--no-autostart` opens SARA FM without starting (for testing);
+  `--autostart` is no longer needed.
+
 ## v0.9.88 — don't answer in the gaps of the other station's window
 
 Field: Winlink Express on DW1IRF's PC used DX1FLR's radio over Tailscale

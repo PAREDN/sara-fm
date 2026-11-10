@@ -40,7 +40,7 @@ echo === Building %VER% ===
 if exist build rmdir /s /q build
 if exist dist\SARA-FM rmdir /s /q dist\SARA-FM
 %PY% -m PyInstaller --noconfirm --clean --onedir --console --name SARA-FM ^
-  --hidden-import hid --hidden-import serial --hidden-import serial.tools.list_ports --hidden-import fec_cc --hidden-import session_stats --hidden-import gauges --hidden-import chat --hidden-import chat_window ^
+  --hidden-import hid --hidden-import serial --hidden-import serial.tools.list_ports --hidden-import fec_cc --hidden-import session_stats --hidden-import gauges --hidden-import chat --hidden-import chat_window --hidden-import ax25_term --hidden-import term_window --hidden-import update_check ^
   --exclude-module test_offline --exclude-module reedsolo ^
   sara_pingpong.py || goto :fail
 

@@ -399,10 +399,9 @@ class WebUI:
             a._apply_tx_delay()
         if changed:
             a._save_settings()
-            a._log("Settings changed from the web page: " + ", ".join(changed)
-                   + (" -- press Stop, then Start, for device / PTT changes" if
-                      set(changed) & {"input_device", "output_device", "ptt", "ra_board", "serial_port",
-                                      "pi_gpio_pin"} and a.engine is not None else ""))
+            a._log("Settings changed from the web page: " + ", ".join(changed))
+            if hasattr(a, "_settings_closed"):
+                a._settings_closed()          # v0.9.89: restarts by itself when needed
 
     def snapshot_options(self) -> dict:
         with self._lock:
@@ -601,7 +600,7 @@ max-height:60vh;overflow:auto}
 <section id="tab-setup" hidden><div class="card" id="setup"></div>
  <div class="btns" style="margin-top:8px"><button id="b-save" class="primary">Save settings</button>
  <button data-act="refresh_devices">Find devices</button><button data-act="test_ptt">Test PTT (2 s)</button></div>
- <p class="hint">Device and PTT changes take effect after Stop, then Start.</p>
+ <p class="hint">Device, PTT and KISS port changes restart SARA FM by itself.</p>
  <div class="btns" id="winbtns" hidden style="margin-top:8px"><button id="b-win"></button>
  <button id="b-quit" class="stop">Close SARA FM</button></div>
  <p class="hint" id="winhint" hidden>On a slow PC, hiding the SARA FM window saves the most CPU: run it from this page instead.</p>

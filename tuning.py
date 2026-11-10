@@ -227,20 +227,20 @@ def tune_verdict(target: str, *, reply: bool, their_snr=None, their_raw=None, da
     t = target or "the other station"
     if not reply:
         return ("failed", f"NO REPLY FROM {t}",
-                f"Same frequency? Is SARA FM started at {t}? Press TUNE 10s and ask {t} "
+                f"Same frequency? Is SARA FM started at {t}? Send a Test tone (Settings > Devices) and ask {t} "
                 f"to watch its RX meter -- no movement means your signal isn't reaching them.")
     if my_clip:
         return ("warn", "TURN DOWN YOUR RADIO'S VOLUME",
                 f"{t}'s signal clips your sound card input. Lower the radio's audio (or the "
-                f"Windows recording level), then press Tune again.")
+                f"Windows recording level), then press Auto-Tune again.")
     if their_replies_clipped:
         return ("warn", f"YOUR LEVELS ARE FINE -- {t} TRANSMITS TOO LOUD",
-                f"{t}'s replies arrive overdriven. {t} should press Tune to you "
+                f"{t}'s replies arrive overdriven. {t} should press Auto-Tune to you "
                 f"(if {t} is a gateway, tell its sysop).")
     if their_raw is not None and their_raw > RAW_HOT_DBFS and tx_pct is not None and tx_pct <= TUNE_TX_LOW_PCT:
         return ("warn", "TURN DOWN YOUR TX AUDIO",
                 f"Your signal clips {t}'s sound card even at TX {tx_pct}%. Turn down the audio "
-                f"into your radio (the interface's TX trimpot), then press Tune again.")
+                f"into your radio (the interface's TX trimpot), then press Auto-Tune again.")
     if data_db is not None and data_db < CARRIER_LIGHT_GREEN_DB:
         if their_raw is not None and their_raw < RAW_QUIET_DBFS and tx_pct is not None \
                 and tx_pct >= TUNE_TX_HIGH_PCT:
@@ -252,7 +252,7 @@ def tune_verdict(target: str, *, reply: bool, their_snr=None, their_raw=None, da
             up = min(100, max(tx_pct + 10, tx_pct * 2))
             return ("warn", "RAISE YOUR TX LEVEL",
                     f"Too quiet at {t} (data carriers {data_db:.0f} dB). Set TX level to {up}% "
-                    f"and press Tune again.")
+                    f"and press Auto-Tune again.")
         if data_flat:
             return ("warn", "WEAK LINK -- NOT YOUR LEVELS",
                     f"Data carriers only {data_db:.0f} dB at {t} at every TX level, so a level "
@@ -260,7 +260,7 @@ def tune_verdict(target: str, *, reply: bool, their_snr=None, their_raw=None, da
                     f"at the slower speeds.")
         return ("warn", "WORKS, AT SLOWER SPEEDS",
                 f"Data carriers {data_db:.0f} dB at {t}: good enough for the slower modes. "
-                f"Saved -- press Tune again another time to recheck.")
+                f"Saved -- press Auto-Tune again another time to recheck.")
     if their_snr is not None and data_db is None and their_snr < 12:
         return ("warn", "WEAK LINK",
                 f"{t} hears you at S/N {their_snr:+.0f} dB -- that's the radio path, not a level "

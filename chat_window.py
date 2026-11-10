@@ -14,6 +14,7 @@ only shows it.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -28,6 +29,20 @@ STATUS_TEXT = {
     "retrying": "resending...", "held": "held -- will deliver when heard", "failed": "failed ✗",
     "cancelled": "cancelled", "receiving": "receiving...", "received": "received ✓",
 }
+# v0.9.93: dark by default (white text on black, like SARA Terminal), with a
+# button to switch to the light look
+THEMES = {
+    "dark": {"bg": "#101418", "fg": "#e6edf3", "entry_bg": "#1a2027", "sel": "#2d4a66",
+             "me": "#7fd4ff", "them": "#8fe08f", "time": "#8b96a0", "sys": "#a8b0b8", "cq": "#ff8ac8",
+             "note": "#f0c060", "link": "#7fd4ff", "st_other": "#8b96a0",
+             "status": {"delivered": "#6fd08c", "received": "#6fd08c", "sent": "#a8b0b8", "held": "#f0c060",
+                        "failed": "#ff7b72", "retrying": "#f0c060", "cancelled": "#8b96a0"}},
+    "light": {"bg": "#ffffff", "fg": "#000000", "entry_bg": "#ffffff", "sel": "#cce4ff",
+              "me": "#0b4f8a", "them": "#1f6b2f", "time": "#888888", "sys": "#777777", "cq": "#a0005a",
+              "note": "#b06a00", "link": "#0b4f8a", "st_other": "#888888", "status": None},
+}
+VIEW_FILE = "chat_view.json"
+
 STATUS_COLOR = {"delivered": "#1f7a3a", "received": "#1f7a3a", "sent": "#555555", "held": "#b06a00",
                 "failed": "#c0261d", "retrying": "#b06a00", "cancelled": "#888888"}
 
@@ -84,8 +99,11 @@ class ChatWindow(tk.Toplevel):
         ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=10)
         ttk.Button(top, text="CQ", width=6, command=lambda: self._net("cq")).pack(side="left")
         ttk.Button(top, text="Check in", command=lambda: self._net("checkin")).pack(side="left", padx=4)
+        self.theme_btn = ttk.Button(top, text="Light", width=7, command=self.toggle_theme)
+        self.theme_btn.pack(side="right")
+        ttk.Button(top, text="Files", width=6, command=self._open_files).pack(side="right", padx=4)
         self.status_var = tk.StringVar(value="")
-        ttk.Label(top, textvariable=self.status_var, foreground="#555").pack(side="right")
+        ttk.Label(top, textvariable=self.status_var, foreground="#555").pack(side="right", padx=6)
 
         body = ttk.PanedWindow(self, orient="horizontal")
         body.pack(fill="both", expand=True, padx=8, pady=4)
@@ -99,7 +117,8 @@ class ChatWindow(tk.Toplevel):
         self.chat_list.bind("<<ListboxSelect>>", self._on_chat_pick)
         ttk.Label(left, text="Heard", font=("TkDefaultFont", 10, "bold")).pack(anchor="w", pady=(8, 0))
         cols = ("call", "last", "snr", "how")
-        self.heard_tv = ttk.Treeview(left, columns=cols, show="headings", height=10, selectmode="browse")
+        self.heard_tv = ttk.Treeview(left, columns=cols, show="headings", height=10, selectmode="browse",
+                                     style="SaraChat.Treeview")
         for c, w, t in (("call", 80, "Call"), ("last", 70, "Last"), ("snr", 44, "S/N"), ("how", 56, "How")):
             self.heard_tv.heading(c, text=t)
             self.heard_tv.column(c, width=w, anchor="w", stretch=False)
@@ -152,6 +171,62 @@ class ChatWindow(tk.Toplevel):
         self.send_btn.pack(fill="x")
         self.file_btn = ttk.Button(btns, text="Send file...", command=self.send_file)
         self.file_btn.pack(fill="x", pady=(4, 0))
+        self.dark = self._load_view().get("dark", True)
+        self.apply_theme()
+
+    # ── look (v0.9.93) ───────────────────────────────────────────────
+    def _view_path(self):
+        try:
+            return os.path.join(self.app._chat_dir(), VIEW_FILE)
+        except Exception:
+            return None
+
+    def _load_view(self) -> dict:
+        p = self._view_path()
+        try:
+            with open(p) as fh:
+                d = json.load(fh)
+            return d if isinstance(d, dict) else {}
+        except (OSError, ValueError, TypeError):
+            return {}
+
+    def toggle_theme(self):
+        self.dark = not self.dark
+        self.apply_theme()
+        p = self._view_path()
+        if p:
+            try:
+                with open(p, "w") as fh:
+                    json.dump({"dark": self.dark}, fh)
+            except OSError:
+                pass
+
+    def apply_theme(self):
+        th = THEMES["dark" if self.dark else "light"]
+        self.theme_btn.configure(text="Light" if self.dark else "Dark")
+        self.text.configure(background=th["bg"], foreground=th["fg"], insertbackground=th["fg"],
+                            selectbackground=th["sel"])
+        self.entry.configure(background=th["entry_bg"], foreground=th["fg"], insertbackground=th["fg"],
+                             selectbackground=th["sel"])
+        self.chat_list.configure(background=th["entry_bg"], foreground=th["fg"], selectbackground=th["sel"],
+                                 selectforeground=th["fg"])
+        try:
+            ttk.Style(self).configure("SaraChat.Treeview", background=th["entry_bg"],
+                                      fieldbackground=th["entry_bg"], foreground=th["fg"])
+            ttk.Style(self).map("SaraChat.Treeview", background=[("selected", th["sel"])],
+                                foreground=[("selected", th["fg"])])
+        except tk.TclError:
+            pass
+        for tag in ("me", "them", "time", "sys", "cq", "note", "link", "st_other"):
+            self.text.tag_configure(tag, foreground=th[tag])
+        for st, col in (th["status"] or STATUS_COLOR).items():
+            self.text.tag_configure("st_" + st, foreground=col)
+
+    def _open_files(self):
+        try:
+            _open_path(self.app._chat_files_dir())
+        except Exception:
+            pass
 
     # ── lists ────────────────────────────────────────────────────────
     def refresh_lists(self):
@@ -187,7 +262,7 @@ class ChatWindow(tk.Toplevel):
     def _update_status(self):
         app = self.app
         if getattr(app, "engine", None) is None:
-            s = "Modem stopped -- press Start in SARA FM to chat"
+            s = "Modem not running -- check Settings > Devices"
         elif hasattr(app, "_session_busy") and app._session_busy():
             s = "Winlink session in progress -- chat waits until it's idle"
         else:

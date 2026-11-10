@@ -25,6 +25,8 @@ check and improve it.
   sessions.
 - **SARA Chat**: keyboard chat and file transfer between stations, also usable
   from another computer over the network.
+- **SARA Terminal**: a plain terminal, like VARA Terminal, that connects over
+  SARA FM to a BPQ32 node and its Chat Server.
 - **Phone web page** and a **Raspberry Pi** headless mode for low-power
   go-kits.
 - **One-button Tune** that sets audio levels between two stations.

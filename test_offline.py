@@ -31,6 +31,14 @@ from bpq_bridge import BpqBridge
 import audio_io
 import fec
 from sara_pingpong import SelfEchoFilter
+# v0.9.92: the tests use their own settings folder. Field (DW1IRF build of
+# 0.9.91): run in a folder whose sara_pp_settings.json had "This station is a
+# gateway" ticked, the per-station levels test failed -- a gateway keeps one
+# set of levels on purpose. The tests also no longer write the real file.
+import sara_pingpong as _sp_for_dir
+_TEST_APP_DIR = _tempfile.mkdtemp(prefix="sara_fm_test_settings_")
+_REAL_APP_DIR = _sp_for_dir.app_dir
+_sp_for_dir.app_dir = lambda: _TEST_APP_DIR
 
 
 PASS = "PASS"
@@ -1873,7 +1881,7 @@ def test_frozen_exe_safety():
         # hard-coded drive-less path and falsely failed on Windows.
         expected = os.path.dirname(os.path.abspath(fake_exe))
         script_dir = os.path.dirname(os.path.abspath(sara_pingpong.__file__))
-        got = sara_pingpong.app_dir()
+        got = _REAL_APP_DIR()
         check("frozen: logs go next to SARA-PP.exe, not inside the bundle",
               got == expected and got != script_dir, f"got={got}, expected={expected}")
 
@@ -1902,7 +1910,7 @@ def test_frozen_exe_safety():
         if not had_frozen:
             del _sys.frozen
     check("not frozen: app_dir() is the script's own folder",
-          sara_pingpong.app_dir() == os.path.dirname(os.path.abspath(sara_pingpong.__file__)))
+          _REAL_APP_DIR() == os.path.dirname(os.path.abspath(sara_pingpong.__file__)))
 
 # ── Test 46: per-program audio levels + saved settings (v0.6.5) ────────
 class _FakeVar:
@@ -4465,6 +4473,8 @@ def test_sara_chat():
               delivered == [] and app.chat.convs["DW1IRF"][-1]["text"] == "hi gateway"
               and acks and acks[-1]["type"] == chat.T_ACK and acks[-1]["ids"] == [5])
         check("the Chat button shows the unread message", "1 new" in app.chat_btn.cget("text"))
+        check("...and so does Chat on the menu bar (v0.9.96)",
+              "1 new" in app._menubar.entrycget(app._chat_menu_index, "label"))
         app._last_session_activity = _time.time()          # a Winlink session is moving data
         n0 = len(queued)
         e = app.chat.send_text("DW1IRF", "hello back")[0]
@@ -4945,7 +4955,7 @@ def test_gauge_and_menus():
         hidden = not app.log_box.winfo_ismapped() and app.gauge.winfo_ismapped() and app.status_bar.winfo_ismapped()
         app._apply_view("full")
         app.update()
-        back = app.log_box.winfo_ismapped() and app.ping_btn.winfo_ismapped()
+        back = app.log_box.winfo_ismapped()
         check("View > Gauges only hides buttons and log, keeps gauges and status bar; Full brings them back",
               hidden and back)
 
@@ -7453,6 +7463,440 @@ def test_hold_ack_while_peer_mid_window():
             pass
 
 
+def test_runs_by_itself():
+    """v0.9.89: no Start button -- SARA FM starts when it opens (like VARA FM),
+    restarts by itself after a sound card / PTT / KISS port change, and has
+    Ping and Tune on the menu bar."""
+    import sara_pingpong as sp
+    app = sp.App()
+    logs, shown, calls = [], [], []
+    try:
+        app._log = lambda m: logs.append(m)
+        app._save_settings = lambda: None
+        app._show_dialog = lambda w: shown.append(w)
+        check("main window has no Start button shown", not app.connect_btn.winfo_manager())
+        labels = [app._menubar.entrycget(i, "label") for i in range(app._menubar.index("end") + 1)
+                  if app._menubar.type(i) in ("command", "cascade")]
+        check("menu bar laid out like VARA FM: Settings View Ping Log Chat Terminal Help",
+              labels == ["Settings", "View", "Ping", "Log", "Chat", "Terminal", "Help"], labels)
+        app.call_var.set("")
+        app._auto_start()
+        check("first run, no callsign: opens SARA Setup instead of an error box",
+              shown == [app.setup_win] and app.engine is None and any("callsign" in m for m in logs))
+        app.call_var.set("DX1FLR")
+        app.in_dev_var.set(""); shown.clear()
+        app._auto_start()
+        check("no sound card picked: opens Devices", shown == [app.devices_win] and app.engine is None)
+        # starting / restarting, with the real start replaced
+        app.in_dev_var.set("1: Mic"); app.out_dev_var.set("3: Spk")
+
+        class Eng:
+            def stop(self):
+                calls.append("stop")
+        def fake_connect():
+            calls.append("start"); app.engine = Eng(); app._run_sig = app._engine_sig()
+        app._connect = fake_connect
+        app._disconnect = lambda: (calls.append("stop"), setattr(app, "engine", None))
+        app._settings_closed()
+        check("opened by a test (not to run): closing Settings starts nothing", calls == [], calls)
+        app._autorun = True                  # as main() sets it
+        app._settings_closed()
+        check("closing Settings once set up: starts by itself", calls == ["start"], calls)
+        app._settings_closed()
+        check("closing Settings with nothing changed: no restart", calls == ["start"], calls)
+        app.kiss_port_var.set("8305")
+        app._session_busy = lambda: True
+        app._settings_closed()
+        check("KISS port changed during a Winlink transfer: waits for it to finish",
+              calls == ["start"] and any("when the Winlink session is idle" in m for m in logs))
+        app._session_busy = lambda: False
+        app._retry_pending_restart()
+        check("...then restarts once the session is idle", calls == ["start", "stop", "start"], calls)
+        # Start with Windows: the shortcut command (Windows only; checked here with a stand-in)
+        import tempfile, os as _o, sys as _s
+        os_env = _o.environ.get("APPDATA")
+        _o.environ["APPDATA"] = tempfile.mkdtemp()
+        ran = []
+        try:
+            import tkinter as _tk
+            app.win_start_var = _tk.BooleanVar(value=True)
+            app._toggle_start_with_windows(run=lambda cmd, **k: ran.append(cmd))
+            link = app._startup_link_path()
+            check("Start with Windows: one PowerShell call makes a shortcut in the Startup folder",
+                  len(ran) == 1 and ran[0][0] == "powershell" and "Startup" in link
+                  and link.endswith("SARA FM.lnk") and "CreateShortcut" in ran[0][-1]
+                  and _o.path.abspath(sp.__file__) in ran[0][-1], ran)
+            open(link if _o.makedirs(_o.path.dirname(link), exist_ok=True) is None else link, "w").close()
+            app.win_start_var.set(False)
+            app._toggle_start_with_windows(run=lambda cmd, **k: ran.append(cmd))
+            check("...and unticking it removes the shortcut", not _o.path.exists(link))
+        finally:
+            if os_env is None:
+                _o.environ.pop("APPDATA", None)
+            else:
+                _o.environ["APPDATA"] = os_env
+        app._restart(why="test")
+        check("Restart SARA FM (Settings > Devices) restarts by hand", calls[-2:] == ["stop", "start"], calls)
+        app.engine = None
+    finally:
+        try:
+            app.destroy()
+        except Exception:
+            pass
+
+
+def test_single_copy_per_folder():
+    """v0.9.89: Winlink Express can launch SARA FM for each Packet session --
+    a second copy from the same folder brings the first to the front and
+    closes; a copy from another folder (gateway + client on one PC) runs."""
+    import time as _t, tempfile, sara_pingpong as sp
+    d1, d2 = tempfile.mkdtemp(), tempfile.mkdtemp()
+    shown = []
+    first = sp.single_instance(lambda: shown.append("show"), folder=d1)
+    second = sp.single_instance(lambda: shown.append("second"), folder=d1)
+    t0 = _t.time()
+    while not shown and _t.time() - t0 < 3:
+        _t.sleep(0.05)
+    check("second copy from the same folder: told to close, first one asked to show",
+          first is not None and second is None and shown == ["show"], shown)
+    other = sp.single_instance(lambda: None, folder=d2)
+    check("a copy from a different folder still runs (gateway + Winlink Express client on one PC)",
+          other is not None and sp._instance_port(d1) != sp._instance_port(d2))
+    for s_ in (first, other):
+        try:
+            s_.close()
+        except Exception:
+            pass
+
+
+class _SimNode:
+    """A small BPQ32-like node (the answering side of AX.25) for testing the
+    SARA Terminal."""
+    def __init__(self, call, send):
+        import ax25_term as A
+        self.A, self.call, self.send = A, call, send
+        self.peer, self.vr, self.vs, self.lines, self.connected, self.rej_sent = None, 0, 0, [], False, False
+
+    def _o(self, ctrl, cmd, info=None):
+        self.send([self.A.build(self.peer, self.call, ctrl, cmd, info)])
+
+    def say(self, text):
+        out = []
+        for i in range(0, len(text), 100):
+            out.append(self.A.build(self.peer, self.call, (self.vr << 5) | (self.vs << 1), True,
+                                    text[i:i + 100].encode()))
+            self.vs = (self.vs + 1) % 8
+        self.send(out)
+
+    def receive(self, f):
+        A = self.A
+        p = A.parse(f)
+        if not p or p["dest"] != self.call:
+            return
+        c = p["control"]
+        base, pf = c & ~A.PF & 0xFF, bool(c & A.PF)
+        if base == A.SABM:
+            self.peer, self.vr, self.vs, self.connected = p["src"], 0, 0, True
+            self._o(A.UA | A.PF, False)
+            self.say(f"MATABA:{self.call}}} Connected to node\r")
+        elif base == A.DISC:
+            self._o(A.UA | A.PF, False)
+            self.connected = False
+        elif c & 1 == 0:
+            if (c >> 1) & 7 == self.vr:
+                self.vr, self.rej_sent = (self.vr + 1) % 8, False
+                txt = p["info"].decode()
+                self.lines.append(txt)
+                if txt.strip().upper() == "CHAT":
+                    self.say("You are now in the chat server\r")
+                else:
+                    self._o((self.vr << 5) | (A.PF if pf else 0) | A.RR, False)
+            elif not self.rej_sent:
+                self.rej_sent = True
+                self._o((self.vr << 5) | (A.PF if pf else 0) | A.REJ, False)
+        elif c & 3 == 1 and p["command"] and pf:
+            self._o((self.vr << 5) | A.PF | A.RR, False)
+
+
+def test_sara_terminal():
+    """v0.9.90: SARA Terminal -- AX.25 connections from SARA FM itself, for a
+    BPQ32 node's Chat Server (DX1PRD-12 on Mt Mataba), like EasyTerm."""
+    import ax25_term as A
+    t = [0.0]
+    air, texts, st = [], [], []
+    drop = {"n": 0, "pred": None}
+    term = A.Session("DW1IRF-7", lambda fs: air.extend(("node", f) for f in fs),
+                     on_text=texts.append, on_status=st.append, clock=lambda: t[0])
+    node = _SimNode("DX1PRD-12", lambda fs: air.extend(("term", f) for f in fs))
+
+    def run(sec):
+        end = t[0] + sec
+        while t[0] < end:
+            while air:
+                to, f = air.pop(0)
+                if drop["pred"] and drop["n"] > 0 and drop["pred"](to, f):
+                    drop["n"] -= 1
+                    continue
+                (node.receive if to == "node" else term.receive)(f)
+            t[0] += 0.25
+            term.tick()
+
+    f = A.build("DX1PRD-12", "DW1IRF-7", A.SABM | A.PF, True)
+    p = A.parse(f)
+    check("AX.25 frame: callsigns, command bit and control byte round-trip",
+          p["dest"] == "DX1PRD-12" and p["src"] == "DW1IRF-7" and p["command"] and p["control"] == 0x3F)
+    term.connect("DX1PRD-12")
+    run(3)
+    check("connects to the node (SABM / UA) and shows its greeting",
+          term.state == A.CONNECTED and "Connected to node" in "".join(texts), st)
+    term.send_text("CHAT")
+    run(3)
+    check("typed line goes out ending in CR; the node's answer shows",
+          node.lines == ["CHAT\r"] and "chat server" in texts[-1], (node.lines, texts[-1:]))
+    drop.update(n=1, pred=lambda to, f: to == "node" and A.parse(f)["control"] & 1 == 0)
+    for line in ("hello one", "hello two", "hello three"):
+        term.send_text(line)
+    run(40)
+    check("a lost frame is sent again: every line arrives once, in order",
+          "".join(node.lines[1:]) == "hello one\rhello two\rhello three\r", node.lines)
+    drop.update(n=2, pred=lambda to, f: to == "term")
+    term.send_text("after loss")
+    run(60)
+    check("the node's acknowledgments lost: the terminal asks again and carries on",
+          node.lines[-1].endswith("after loss\r") and term.state == A.CONNECTED
+          and term._outstanding() == 0, node.lines)
+    term.disconnect()
+    run(3)
+    check("Disconnect: DISC / UA", term.state == A.DISCONNECTED and not node.connected, st[-1])
+    st2 = []
+    t2 = A.Session("DW1IRF-7", lambda fs: None, on_status=st2.append, clock=lambda: t[0])
+    t2.connect("NOBODY")
+    for _ in range(400):
+        t[0] += 0.25
+        t2.tick()
+    check("no answer: gives up after the set number of tries", t2.state == A.DISCONNECTED
+          and "No answer" in st2[-1], st2[-1])
+    sent = []
+    t3 = A.Session("DW1IRF-7", lambda fs: sent.extend(fs), on_status=lambda s: None, clock=lambda: t[0])
+    t3.receive(A.build("DW1IRF-7", "DX1AAA", A.SABM | A.PF, True))
+    check("someone connecting TO the terminal is refused (DM): it only calls out",
+          sent and A.parse(sent[0])["control"] & ~A.PF & 0xFF == A.DM)
+    check("digipeater frames still on their way aren't taken by the terminal",
+          not t3.wants(A.build("DW1IRF-7", "DX1PRD-12", A.UA, False, None, ["DW3TDJ"])))
+
+    # in the app: through the same transmitter as BPQ32, and kept away from BPQ32
+    import sara_pingpong as sp, term_window, bpq_bridge
+    TW = term_window.TerminalWindow
+    check("Connect to: plain, and via a digipeater",
+          TW.parse_target("dx1prd-12") == ("DX1PRD-12", []) and
+          TW.parse_target("DX1PRD-12 via DW1IRF") == ("DX1PRD-12", ["DW1IRF"]) and
+          TW.parse_target("DX1PRD-12 foo") is None and TW.parse_target("") is None)
+    check("terminal callsign defaults to this station with -7",
+          term_window.default_call("DW1IRF") == "DW1IRF-7")
+    import tempfile
+    app = sp.App()
+    queued = []
+    try:
+        app._log = lambda m: None
+        app.call_var.set("DW1IRF")
+
+        class Eng:
+            def queue_transmit(self, payload, modulation=None, on_sent=None, on_error=None):
+                queued.append((payload, modulation))
+        app.engine = Eng()
+        app._term_win = TW(app, tempfile.mkdtemp())
+        w = app._term_win
+        w.mycall_var.set("DW1IRF")
+        w.target_var.set("DX1PRD-12")
+        w.connect()
+        check("terminal refuses the station's own callsign (BPQ32 may use it)", app.__dict__.get("term") is None)
+        w.mycall_var.set("DW1IRF-7")
+        w.connect()
+        frames = bpq_bridge.unpack_batch(queued[-1][0]) if queued else []
+        check("Connect sends a SABM to DX1PRD-12 through SARA FM's transmitter",
+              len(frames) == 1 and A.parse(frames[0])["control"] == A.SABM | A.PF
+              and A.parse(frames[0])["dest"] == "DX1PRD-12")
+        ua = A.build("DW1IRF-7", "DX1PRD-12", A.UA | A.PF, False)
+        other = A.build("DW1IRF-10", "DX1FLR", A.SABM | A.PF, True)
+        left = app._term_take([ua, other])
+        check("received: the terminal's frames go to it, the rest still go to BPQ32",
+              left == [other] and app.term.state == A.CONNECTED)
+        w.line_var.set("CHAT")
+        w.send_line()
+        frames = bpq_bridge.unpack_batch(queued[-1][0])
+        check("typing CHAT sends an I frame", A.parse(frames[0])["info"] == b"CHAT\r"
+              and "CHAT" in w.text.get("1.0", "end"))
+        check("the log shows the terminal's frames as TERM, not BPQ32", app._term_frames(frames))
+        # v0.9.91: field (0.9.90, DW1IRF-7 -> DV1UK-12): no KISS client connected ->
+        # the transmitter dropped every terminal acknowledgment and typed line
+        class Br:
+            _client_sock = None
+        app.bridge = Br()
+        app.engine.turn_time = lambda: 0.0
+        rr = A.build("DX1PRD-12", "DW1IRF-7", (1 << 5) | A.RR, False)
+        client_i = A.build("DX1FLR-10", "DW1IRF", (0 << 5) | (2 << 1), True, b"data")
+        out = app._tx_filter(bpq_bridge.pack_batch([client_i, frames[0], rr]))
+        kept = bpq_bridge.unpack_batch(out) if out else []
+        check("no KISS client: the terminal's I frame and RR still go out (the old client's data doesn't)",
+              frames[0] in kept and rr in kept and client_i not in kept, len(kept))
+        app.bridge = None
+        app.engine = None
+    finally:
+        try:
+            app.destroy()
+        except Exception:
+            pass
+
+
+def test_vara_style_gui():
+    """v0.9.93: GUI laid out for volunteers who know VARA FM."""
+    import sara_pingpong as sp, chat_window
+    app = sp.App()
+    try:
+        app._log = lambda m: None
+        app._save_settings = lambda: None
+        mb = app._menubar
+        idx = {mb.entrycget(i, "label"): i for i in range(mb.index("end") + 1)
+               if mb.type(i) in ("command", "cascade")}
+        st = app.nametowidget(mb.entrycget(idx["Settings"], "menu"))
+        st_labels = [st.entrycget(i, "label") for i in range(st.index("end") + 1)
+                     if st.type(i) in ("command", "checkbutton")]
+        check("Settings menu: SARA Setup and Devices -- nothing else (v0.9.94)",
+              st_labels == ["SARA Setup...", "Devices..."], st_labels)
+        vw = app.nametowidget(mb.entrycget(idx["View"], "menu"))
+        check("View menu: Full and Gauges only",
+              [vw.entrycget(i, "label") for i in range(vw.index("end") + 1)] ==
+              ["Full (gauges, buttons and log)", "Gauges only"])
+        check("Chat and Terminal on the menu bar open their windows directly",
+              mb.type(idx["Chat"]) == "command" and mb.type(idx["Terminal"]) == "command")
+        app._apply_view("gauges"); app.update()
+        app._show_tune_view(); app.update()
+        check("Full view: no Target row, no PING / Chat buttons, no Tune banner (v0.9.95, v0.9.96)",
+              app.view_var.get() == "full" and not app.ping_btn.winfo_ismapped()
+              and not app.chat_btn.winfo_ismapped() and not app.target_combo.winfo_ismapped()
+              and not app.tune_status_lbl.winfo_ismapped() and app.log_box.winfo_ismapped())
+        check("main window: PING stays, Tune and TUNE 10s are gone",
+              not app.autotune_btn.winfo_ismapped() and not app.tune_btn.winfo_ismapped())
+        # Ping window: station picker + sliders
+        app.rx_gain_db_var.set("24"); app.tx_level_var.set("25")
+        app.target_var.set("DV1UK"); app._store_profile("DV1UK", why="test")
+        app.rx_gain_db_var.set("10"); app.tx_level_var.set("40")
+        app.target_var.set("DX1FLR"); app._store_profile("DX1FLR", why="test")
+        app._open_ping_window(); app.update()
+        w = app.ping_win
+        check("Ping (menu) opens the Ping window with a station picker and two sliders",
+              w is not None and w.target_combo is not None and w.tx_scale is not None
+              and w.rx_scale is not None)
+        dv = [v for v in app.target_combo["values"] if v.startswith("DV1UK")][0]
+        w.target_combo.set(dv)
+        w._target(); app.update()
+        check("picking a station in the Ping window brings back its saved levels",
+              app.target_var.get() == "DV1UK" and app._current_profile()["tx_level_pct"] == 25
+              and "DV1UK" in w.peer_var.get(), (app.target_var.get(), app._current_profile()))
+        # v0.9.94: same on a gateway, and the sliders show the saved levels
+        app.gateway_var.set(True)
+        for name, rx, tx in (("DX1FLR", 10, 40), ("DV1UK", 24, 25)):
+            w.target_combo.set([v for v in app.target_combo["values"] if v.startswith(name)][0])
+            w._target(); app.update()
+            check(f"gateway: picking {name} in the Ping window puts its saved levels on the sliders",
+                  int(float(w.rx_scale.get())) == rx and int(float(w.tx_scale.get())) == tx,
+                  (w.rx_scale.get(), w.tx_scale.get()))
+        app.gateway_var.set(False)
+        app._gw_levels = None
+        w.tx_scale.set(33); w.rx_scale.set(-5); app.update()
+        # v0.9.95: Save / Remove / Location in the Ping window
+        check("Ping window has Location, Save and Remove", w.save_btn is not None and w.remove_btn is not None)
+        w.target_combo.set("DX1PRD-12"); w._target()
+        app.target_loc_var.set("Mt Mataba")
+        w.save_btn.invoke(); app.update()
+        t12 = app._find_target("DX1PRD-12")
+        check("Save in the Ping window keeps the station, its location and the slider levels",
+              t12 is not None and t12[1] == "Mt Mataba" and t12[2]["tx_level_pct"] == 33
+              and t12[2]["rx_gain_db"] == -5
+              and any(v.startswith("DX1PRD-12") for v in w.target_combo["values"]), t12)
+        w.remove_btn.invoke(); app.update()
+        check("Remove in the Ping window takes it off the list",
+              app._find_target("DX1PRD-12") is None
+              and not any(v.startswith("DX1PRD-12") for v in w.target_combo["values"]))
+        check("sliders set the TX level and RX gain",
+              app._current_profile()["tx_level_pct"] == 33 and app._current_profile()["rx_gain_db"] == -5,
+              app._current_profile())
+        w.destroy()
+        # Chat: dark by default, button switches and is remembered
+        class Eng:
+            convs, unread = {}, {}
+            def held_for(self, k): return 0
+            def heard_list(self): return []
+        cw = None
+        try:
+            app.open_chat(); app.update()
+            cw = app.chat_win
+        except Exception:
+            pass
+        if cw is not None:
+            dark_bg = cw.text.cget("background")
+            cw.toggle_theme()
+            light_bg = cw.text.cget("background")
+            again = chat_window.ChatWindow.__new__(chat_window.ChatWindow)
+            again.app = app
+            check("SARA Chat: black with white text by default; the button switches to light, and it's kept",
+                  dark_bg.lower() == "#101418" and light_bg.lower() == "#ffffff"
+                  and again._load_view().get("dark") is False, (dark_bg, light_bg))
+            cw.toggle_theme()
+    finally:
+        try:
+            app.destroy()
+        except Exception:
+            pass
+
+
+def test_new_version_notice():
+    """v0.9.96: 'A new SARA FM version is available', like VARA FM."""
+    import io, json as _j, update_check as U
+    check("versions compare as numbers",
+          U.is_newer("v0.9.100", "sara-fm-0.9.96") and U.is_newer("1.0", "0.9.99")
+          and not U.is_newer("v0.9.96", "sara-fm-0.9.96") and not U.is_newer("v0.9.9", "0.9.96")
+          and not U.is_newer("garbage", "0.9.96"))
+
+    class R(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    gh = {"tag_name": "v0.9.97", "html_url": "https://github.com/PAREDN/sara-fm/releases/tag/v0.9.97"}
+    seen = []
+    def opener(req, timeout=0):
+        seen.append(req)
+        if "fail" in req.full_url:
+            raise OSError("no internet")
+        return R(_j.dumps(gh).encode())
+    res = U.latest(sources=["https://fail.example/x", "https://api.github.com/x"], opener=opener)
+    check("GitHub's latest release is read (a source that fails is skipped)",
+          res == ("v0.9.97", gh["html_url"]), res)
+    check("only the version goes out (User-Agent), no callsign",
+          all("SARA-FM/" in r.get_header("User-agent") and "DW1IRF" not in r.full_url for r in seen))
+    check("a plain {version, url} file works too",
+          U.read_answer({"version": "0.9.98", "url": "https://dx1prd.org/sara"}) == ("0.9.98", "https://dx1prd.org/sara"))
+    check("drafts and pre-releases are ignored", U.read_answer({"tag_name": "v1.0", "prerelease": True}) is None)
+    check("no internet: nothing found, quietly", U.latest(sources=["https://fail.example"], opener=opener) is None)
+    import sara_pingpong as sp
+    app = sp.App()
+    try:
+        app._log = lambda m: None
+        app._update_result(("v99.0.0", "https://example.com/dl"), manual=False)
+        app.update()
+        check("newer version: status bar says so, click opens the download page",
+              "99.0.0" in app.update_var.get() and app.update_lbl.winfo_ismapped()
+              and app._update_url == "https://example.com/dl")
+        app.update_var.set(""); app.update_lbl.pack_forget()
+        app._update_result(("v0.0.1", "x"), manual=False)
+        check("same or older version: nothing shown", app.update_var.get() == "")
+        check("the check can be turned off in SARA Setup (on by default)", app.update_check_var.get() is True)
+    finally:
+        try:
+            app.destroy()
+        except Exception:
+            pass
+
+
 def test_slow_pc_buffer_and_kiss_takeover():
     """v0.9.83 (DV1OTT / DU3FS field test, 0.9.79): a slow PC can ask for a
     larger sound-card buffer; a second program taking over the KISS port is
@@ -7688,6 +8132,11 @@ if __name__ == "__main__":
     test_fast_viterbi_same_answers()
     test_levels_when_calling_out()
     test_hold_ack_while_peer_mid_window()
+    test_runs_by_itself()
+    test_single_copy_per_folder()
+    test_sara_terminal()
+    test_vara_style_gui()
+    test_new_version_notice()
     print("=" * 60)
     n_fail = sum(1 for _, s, _ in results if s == FAIL)
     n_pass = sum(1 for _, s, _ in results if s == PASS)
